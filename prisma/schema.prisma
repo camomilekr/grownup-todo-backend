@@ -1,0 +1,28 @@
+// Prisma 스키마. 문법 참조: https://pris.ly/d/prisma-schema
+//
+// 접속 URL은 이 파일에 없다. Prisma 7에서 datasource 블록의 `url`/`directUrl`이
+// 사라졌기 때문이다. 대신 두 곳이 각각 들고 있다.
+//   - CLI(migrate·db pull·studio) → 루트 `prisma.config.ts`가 DIRECT_URL을 쓴다
+//   - 런타임 → `src/prisma/prisma.service.ts`가 DATABASE_URL을 쓴다
+//
+// Prisma가 관리하는 것은 `public` 스키마뿐이다. Supabase가 만든
+// auth·storage·realtime 등은 multiSchema를 켜지 않는 한 diff 대상에서 빠지므로
+// 마이그레이션이 그것들을 건드리지 않는다. multiSchema를 켤 일이 생기면
+// 그 스키마들이 drop 후보로 올라오는지 반드시 먼저 확인해라.
+
+generator client {
+  provider = "prisma-client"
+
+  // 생성물을 `src/` 안에 둔다. `nest build`가 src만 dist로 컴파일하기 때문에
+  // 밖에 두면 `npm run start:prod`가 클라이언트를 찾지 못한다.
+  output = "../src/generated/prisma"
+
+  // NestJS 10은 CommonJS로 컴파일된다. 기본값(esm)으로 두면 생성물이
+  // `import.meta.url`을 써서 tsc가 거부한다.
+  moduleFormat = "cjs"
+  runtime      = "nodejs"
+}
+
+datasource db {
+  provider = "postgresql"
+}
