@@ -40,6 +40,14 @@ else
   (cd "$WT" && npm install)
 fi
 
+# husky 훅은 `.husky/_` 아래에 살고 그것은 추적되지 않는다 — `prepare`가 만든다.
+# clonefile 복제는 npm install을 건너뛰므로 워크트리에 `.husky/_`가 없고,
+# git은 core.hooksPath가 없는 디렉터리를 가리키면 **경고 없이** 훅을 건너뛴다.
+# 그러면 티어 2 작업의 커밋만 verify를 통과하지 않고 들어간다 — 무거운 작업일수록
+# 검증이 없는 곳에서 커밋하게 되므로 여기서 반드시 세운다.
+(cd "$WT" && npm run prepare >/dev/null 2>&1)
+[ -d "$WT/.husky/_" ] && echo "pre-commit 훅 설치 완료" || echo "경고: 훅 설치 실패. 워크트리에서 커밋은 verify를 거치지 않는다" >&2
+
 mkdir -p "$WT/docs/plan" "$WT/docs/dev-loop"
 
 # docs/는 추적되지 않아 워크트리에 딸려오지 않는다. 이름이 맞는 계획서가 있으면 가져간다.
