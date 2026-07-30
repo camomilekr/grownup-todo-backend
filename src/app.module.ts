@@ -2,8 +2,10 @@ import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
+import { BigIntJsonModule } from './common/bigint-json.module';
 import { validateEnv } from './config/env.validation';
 import { PrismaModule } from './prisma/prisma.module';
+import { TodosModule } from './todos/todos.module';
 
 @Module({
   imports: [
@@ -15,7 +17,12 @@ import { PrismaModule } from './prisma/prisma.module';
       validate: validateEnv,
       cache: true,
     }),
+    // BigInt PK가 JSON 응답에서 터지는 것을 막는다. 부트스트랩이 아니라 모듈에
+    // 두는 이유는 테스트가 `main.ts`를 거치지 않기 때문이다 —
+    // `src/common/bigint-json.module.ts` 주석에 근거가 있다.
+    BigIntJsonModule,
     PrismaModule,
+    TodosModule,
   ],
   controllers: [AppController],
   providers: [AppService],
