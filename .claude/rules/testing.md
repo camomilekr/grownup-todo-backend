@@ -88,7 +88,7 @@ expect(onEdit).not.toHaveBeenCalled();
 ## 커버리지
 
 ```bash
-npm run test:coverage
+npm run test:cov
 ```
 
 현재 문 기준 **99%**. `hooks/`, `screens/`, `store/`, `constants/`는 100%다.
@@ -116,5 +116,9 @@ npm run test:coverage
 ## 커밋 전
 
 ```bash
-npm run verify   # lint → typecheck → test. 12초
+npm run verify     # lint → prettier → typecheck. 2초
+npm test           # verify에 테스트는 들어 있지 않다. 별도로 돌린다
+npm run test:e2e   # jest rootDir이 src라 `npm test`는 test/를 돌지 않는다
 ```
+
+**세 명령 중 어느 것도 pre-commit 훅이 돌려 주지 않는다.** 훅은 `verify`만 돌린다 — 테스트를 깨뜨린 커밋을 막는 자동 관문은 이 저장소에 없다.

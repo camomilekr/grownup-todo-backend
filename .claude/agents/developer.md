@@ -73,10 +73,12 @@ model: inherit
 ## 끝내기 전에
 
 ```bash
-npm run verify   # lint → typecheck → test. 12초
+npm run verify     # lint → prettier → typecheck. 2초
+npm test           # verify에 테스트는 들어 있지 않다. 반드시 따로 돌린다
+npm run test:e2e   # jest rootDir이 src라 `npm test`는 test/를 돌지 않는다
 ```
 
-**이게 통과해야 보고한다.** 통과하지 못했다면 실패 내용을 그대로 보고에 담아라. 통과했다고 거짓으로 적지 마라 — 리뷰어가 직접 돌려 보고 바로 드러난다.
+**셋 다 통과해야 보고한다.** 통과하지 못했다면 실패 내용을 그대로 보고에 담아라. 통과했다고 거짓으로 적지 마라 — 리뷰어가 직접 돌려 보고 바로 드러난다.
 
 `src/` 하위 폴더를 건드렸다면 그 폴더의 `CONTEXT.md`를 갱신한다.
 

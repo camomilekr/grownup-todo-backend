@@ -58,19 +58,26 @@ rm: .claude/worktrees/step-goal-presets/node_modules: Directory not empty
 ## lint · 포맷
 
 ```bash
-npm run lint          # ESLint (Prettier 규칙 포함)
-npm run lint:fix      # 자동 수정 가능한 것만
+npm run lint          # ESLint (Prettier 규칙 포함) + 자동 수정(--fix)
+npm run lint:check    # 고치지 않고 검사만. verify가 쓰는 것
 npm run format        # Prettier 적용
 npm run format:check  # 적용하지 않고 위반만 확인
 ```
 
-- 포맷 위반은 `npm run lint`에서도 잡힌다. `eslint-plugin-prettier`가 Prettier를 ESLint 규칙으로 돌리기 때문이다. 그래서 `verify`에 `format:check`를 따로 넣지 않았다
+- 포맷 위반은 대개 `npm run lint:check`에서 먼저 걸린다. `eslint-plugin-prettier`가 Prettier를 ESLint 규칙으로 돌리기 때문이다. **그래서 `verify`의 `format:check`는 대부분 중복이다 — 하지만 지우지 마라.** `/* eslint-disable */`이 붙은 파일에서는 `prettier/prettier` 규칙도 함께 꺼져서 `format:check`가 그 파일의 **유일한 포맷 방어선**이 된다
 - **`eslint-plugin-prettier/recommended`는 항상 마지막에 온다.** 충돌 규칙 해제를 담당하므로 뒤에 다른 설정이 오면 무력화된다
-- **마크다운은 Prettier 대상이 아니다**(`.prettierignore`). 표의 파이프를 문자 수로 정렬하는데 한글은 폭이 2칸이라 정렬 결과가 오히려 어긋나 보인다
-- `printWidth`는 90이다. 기존 코드의 95백분위가 88자였다
-- `ios/`, `android/`는 생성물이라 대상에서 뺐다
-- Prettier는 **주석과 문자열을 재배치하지 않는다.** 긴 한국어 주석이 90자를 넘어도 그대로 남는다
-- `npm run lint`는 error에서만 실패한다. warning은 커밋을 막지 않는다. 강제하려면 `eslint . --max-warnings 0`
+- **`.prettierignore`가 없다.** 마크다운이 대상에서 빠지는 것은 `format`·`format:check`의 글롭이 `.ts`로 한정돼 있기 때문이다
+- `.prettierrc`에는 `singleQuote`와 `trailingComma`만 있다. **`printWidth`는 기본값 80이다**
+- **`format:check`의 글롭은 패턴 하나(`"{src,apps,libs,test}/**/*.ts"`)로 묶여 있다. 여러 패턴으로 쪼개지 마라.** Prettier 3은 **패턴 하나가 아무 파일에도 맞지 않으면 exit 2로 죽는다**(`No files matching the pattern were found`). `"src/**/*.ts" "test/**/*.ts"`처럼 쪼개 두면 `test/`가 없는 순간 verify 전체가 실패하고, 원인은 포맷과 아무 상관이 없어 찾기 어렵다. 중괄호 하나로 묶으면 `src/`만 있어도 통과한다
+- **typecheck만 범위가 다르다.** `lint:check`·`format:check`는 `{src,apps,libs,test}`, `typecheck`는 `node_modules`·`dist`를 뺀 전부다. 루트에 둔 `.ts`는 typecheck만 걸린다
+- Prettier는 **주석과 문자열을 재배치하지 않는다.** 긴 한국어 주석이 80자를 넘어도 그대로 남는다
+- `npm run lint`는 error에서만 실패한다. **`lint:check`에는 `--max-warnings 0`이 붙어 더 엄격하다** — `lint`는 통과했는데 훅이 막는 상황이 여기서 나온다
+
+## husky
+
+- **`prepare`가 `husky || true`인 이유는 프로덕션 설치다.** `npm ci --omit=dev`는 `prepare`를 실행하면서 `husky`(devDependency)를 설치하지 않아 `husky: command not found`로 exit 127이 되고, 설치 전체가 실패한다. `|| true`가 그것만 흡수한다. **부작용은 훅 설치 실패도 조용해진다는 것** — 훅이 걸렸는지는 `git config core.hooksPath`와 `.husky/_`의 존재로 확인해라
+- **훅이 없는 곳이 셋 있다.** (1) 클론 직후 `npm install` 전 (2) `.husky/_`가 없는 워크트리 (3) `HUSKY=0`이 설정된 셸. 셋 다 **경고 없이** 훅을 건너뛴다. 워크트리는 `worktree-new.sh`가 `npm run prepare`를 돌려 세운다
+- 로컬 훅은 강제 수단이 아니라 편의 장치다. `--no-verify`·`HUSKY=0`·`core.hooksPath` 변경으로 우회된다. **실제 강제는 CI의 몫이고 이 저장소에는 아직 CI가 없다**
 
 규칙을 끄거나 낮출 때는 **반드시 이유를 주석으로 남긴다.** 전체를 끄기보다 파일 단위로 좁혀서 끈다.
 

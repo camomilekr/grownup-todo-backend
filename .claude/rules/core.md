@@ -112,7 +112,7 @@ git switch develop && git pull && git switch -c feature/fix-midnight-rollover
 **커밋은 오케스트레이터가 한다.** `developer`는 작업 트리만 남긴다 — 판정 시점 지문과 대조하는 것은 리뷰 결과를 쥔 쪽만 할 수 있다.
 
 ```bash
-npm run verify                                   # 12초. pre-commit 훅도 이것을 돌린다
+npm run verify                                   # lint → prettier → typecheck. 2초. pre-commit 훅도 이것을 돌린다
 git add src/store/todoTypes.ts src/store/CONTEXT.md
 git commit
 git push -u origin feature/step-goal-presets
@@ -125,6 +125,15 @@ gh pr create --base develop                      # base를 반드시 명시한�
 - **`CONTEXT.md` 갱신은 그 폴더를 바꾼 커밋에 함께 넣는다**
 - **쪼갤 수 없으면 합친다.** 중간 커밋이 verify를 통과할 수 없으면 하나의 커밋이다
 - 제목은 한국어로 무엇을 했는지, 본문에는 **왜**를 적는다. 무엇을 바꿨는지는 diff가 말한다
+
+### pre-commit 훅의 사각지대
+
+**훅은 작업트리를 검사한다. 인덱스가 아니다.** `npm run verify`가 프로젝트 전역을 보기 때문이고, 이것이 양쪽으로 어긋난다.
+
+- **깨진 것이 통과한다.** 스테이징한 내용이 verify를 통과하지 못하는데 작업트리에서 이미 고쳐 놨다면 훅은 그대로 통과한다. 위의 "각 커밋 시점에 verify가 통과해야 한다"를 **훅이 보장해 주지 않는다** — 부분 스테이징으로 나눠 커밋한 뒤에는 직접 확인해라
+- **정상인 것이 막힌다.** 커밋 대상은 깨끗한데 스테이징하지 않은 작업 중인 파일이 verify를 깨뜨리면 커밋이 거부된다. 위의 "의미 단위로 나눈다"를 지키려 할 때 바로 걸리는 쪽이다. `--no-verify`는 금지이므로 **`git stash -k -u`**로 치운 뒤 커밋하고 `git stash pop`으로 되돌린다. **`-u`를 빼지 마라** — `git stash`는 기본적으로 추적되지 않은 파일을 치우지 않아서, 새로 만든 파일이 원인이면 `-k`만으로는 훅이 또 실패한다. TDD로 새 테스트와 새 구현을 함께 만드는 상황이 정확히 여기에 걸린다
+
+두 사각지대는 스테이징된 내용만 꺼내 검사하지 않는 한 없어지지 않는다(`lint-staged`가 하는 일). 도입은 결정된 바 없다.
 
 **PR 본문에 적을 것**: 리뷰 라운드 수와 무엇이 지적돼 고쳐졌는지, 남은 `minor` 전체, **규약에 남길 값어치가 있는 것**. `docs/`는 추적되지 않으므로 남길 값어치가 있는 것은 PR 본문에 올려야 살아남는다.
 
