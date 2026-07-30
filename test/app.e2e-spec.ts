@@ -15,6 +15,13 @@ describe('AppController (e2e)', () => {
     await app.init();
   });
 
+  // AppModule이 PrismaModule을 물게 된 뒤로는 반드시 닫아야 한다. `app.init()`이
+  // Postgres 커넥션 풀을 열기 때문에, 닫지 않으면 jest가 열린 핸들 때문에
+  // 종료하지 못하고 매달린다.
+  afterEach(async () => {
+    await app.close();
+  });
+
   it('/ (GET)', () => {
     return request(app.getHttpServer())
       .get('/')
