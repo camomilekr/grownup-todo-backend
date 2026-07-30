@@ -1,0 +1,9 @@
+# Prisma가 생성하는 클라이언트. 손으로 고치지 않는 파일이고, 생성물은
+# prettier 규칙을 따르지 않으므로 `npm run format:check`가 여기서 깨진다.
+# 생성물 안에는 `/* eslint-disable */`와 `// @ts-nocheck`가 들어 있는데
+# prettier용 지시자는 없어서 이 파일로 빼 줘야 한다.
+/src/generated
+
+# 빌드 산출물
+/dist
+/coverage
