@@ -69,12 +69,14 @@ model: inherit
 주입된 `.claude/rules/`와 대조한다. 자주 어긋나는 곳:
 
 - **TDD** — 테스트가 먼저 쓰였는가. 버그 수정에 재현 테스트가 있는가. 테스트가 실제로 무언가를 검증하는가, 아니면 통과만 하는가
-- **테스트 내용** — 구현 세부사항(내부 state 이름, 호출 순서)을 테스트하고 있지 않은가. 접근성 라벨로 요소를 찾는가. RNTL v14의 `render`·`fireEvent`·`unmount`를 await했는가. **prop 단정에 왜 렌더 결과로 볼 수 없는지가 주석에 있는가**
+- **테스트 내용** — 구현 세부사항(호출 순서, 내부 필드 이름)을 테스트하고 있지 않은가. **`PrismaService`를 대역으로 바꿔 Repository를 단위 테스트하고 있지 않은가** — 그러면 쿼리 결과가 아니라 호출 인자만 검증하게 되고 리팩터링마다 깨진다. DB에 실제로 붙는 테스트가 `test/` 아래 e2e에 있는가
+- **테스트가 파일명 규칙을 지키는가** — `*.spec.ts`여야 한다. `.test.ts`로 쓰면 jest `testRegex`에 걸리지 않아 **실행되지 않은 채 통과처럼 보인다**
 - **CONTEXT.md** — `src/` 하위 폴더를 건드렸는데 그 폴더의 `CONTEXT.md`가 그대로가 아닌가
-- **한국어 주석**, `StyleSheet.create()`, 디자인 토큰 사용, `use`/`handle`/`is` 명명
+- **계층 책임** — Controller에 조건 분기나 계산이 생겼는가. Service가 상태 코드·헤더를 아는가. **Repository가 비즈니스 판단을 하는가**
+- **한국어 주석**, 파일명 케밥케이스·클래스명 파스칼케이스, 생성자 주입(`private readonly`)
 - **규칙을 끄거나 낮춘 곳에 이유 주석이 있는가**
 
-`AGENTS.md`의 "알려진 기능 제약"과 `.claude/ref/ios-build.md`의 지뢰(예: `app.json`에 `expo-notifications` 플러그인 추가)를 다시 밟았으면 즉시 지적한다.
+`.claude/ref/incidents.md`에 남은 사고와 각 폴더 `CONTEXT.md`의 함정을 다시 밟았으면 즉시 지적한다. 특히 `src/prisma/CONTEXT.md`는 Prisma 7에서 실제로 막혔던 것들을 담고 있다.
 
 ### 4. 목표 달성
 

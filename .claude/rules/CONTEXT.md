@@ -43,6 +43,6 @@
 ## 적용 범위
 
 - 실제 코드가 있는 `src/` 하위 폴더 각각에만 `CONTEXT.md`를 유지한다
-- 프로젝트 루트는 제외한다. 루트 `CONTEXT.md`는 만들지 않으며, 프로젝트 전체 구조 요약은 `AGENTS.md`가 담당한다
+- 프로젝트 루트는 제외한다. 루트 `CONTEXT.md`는 만들지 않는다
 - `node_modules/`, `assets/` 등 자동 생성·관리되는 폴더는 제외한다
-- 설정 파일(`package.json`, `tsconfig.json`, `app.json` 등)만 변경하는 작업은 이 규칙의 대상이 아니다
+- 설정 파일(`package.json`, `tsconfig.json`, `prisma.config.ts` 등)만 변경하는 작업은 이 규칙의 대상이 아니다
