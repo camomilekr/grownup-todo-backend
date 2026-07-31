@@ -9,7 +9,6 @@
 | `.claude/ref/troubleshooting.md` | 명령이 실패했거나 증상의 원인을 모를 때 |
 | `.claude/ref/testing-traps.md` | 라이브러리가 테스트에서 예상과 다르게 동작할 때 |
 | `.claude/ref/parallel.md` | 트랙을 나눠 병렬로 돌리기로 정한 뒤에만 |
-| `.claude/ref/ios-build.md` | 실기기·시뮬레이터 빌드, Android를 건드릴 때 |
 | `.claude/ref/incidents.md` | 이 규약이 왜 이렇게 생겼는지 근거가 필요할 때 |
 
 메인 세션은 **오케스트레이터**다. 직접 구현하지 않고 서브에이전트를 부르고 결과를 옮긴다. 정의는 `.claude/agents/`에 있다 — `architect`(계획), `developer`(구현), `reviewer`(검토).
@@ -53,7 +52,9 @@ git switch develop && git pull && git switch -c feature/fix-midnight-rollover
 
 **"깨끗하다"를 "주인이 없다"로 읽지 마라.** 커밋 0, 변경 0은 "아직 안 썼다"이지 "주인이 없다"가 아니다. `TaskList`의 `No tasks found`도 근거가 되지 못한다 — 그 도구는 형제 잡을 보지 못한다.
 
-**`Agent` 도구의 `isolation: "worktree"`를 쓰지 않는다.** 이 규약 밖의 경로에 워크트리를 만들어 Metro·Jest 제외 설정이 걸리지 않는다.
+**`Agent` 도구의 `isolation: "worktree"`를 쓰지 않는다.** 이 규약 밖의 경로에 워크트리를 만들어, `.claude/worktrees/` 아래를 전제한 설정(Jest 제외 패턴, IDE 프로젝트 인식)이 걸리지 않는다.
+
+**IDE로 워크트리 코드를 편집할 때는 그 워크트리를 별도 창으로 열어라.** `.claude/`가 점으로 시작하는 디렉토리라 TypeScript와 ESLint가 기본 탐색에서 건너뛴다 — 저장소 루트를 열어 둔 창에서는 워크트리 파일이 어느 프로젝트에도 속하지 않은 것으로 취급돼 `describe`·`it` 같은 jest 전역을 모르는 이름으로 표시한다. 저장소 루트 `tsconfig.json`에 워크트리를 포함시키는 우회는 쓰지 마라 — 루트에서 `verify`를 돌릴 때 같은 클래스가 두 번 선언된 것으로 보인다.
 
 ## 계획 (티어 2)
 
@@ -149,7 +150,7 @@ gh pr create --base develop                      # base를 반드시 명시한�
 - 주석과 문서(JSDoc 등)는 **한국어**로 쓴다. 주석에는 **왜**를 적는다
 - `src/` 하위 폴더를 건드리기 전에 그 폴더의 `CONTEXT.md`를 읽고, 끝난 뒤 갱신한다(`.claude/rules/CONTEXT.md`)
 - 규칙을 끄거나 낮출 때는 반드시 이유를 주석으로 남긴다
-- Expo는 바뀌었다 — 코드를 쓰기 전에 https://docs.expo.dev/versions/v57.0.0/ 의 해당 버전 문서를 확인한다
+- **Prisma 7은 6과 다르다** — 드라이버 어댑터가 필수이고 `datasource` 블록에 URL이 없으며 `migrate dev`가 클라이언트를 재생성하지 않는다. 스키마·마이그레이션을 건드리기 전에 `src/prisma/CONTEXT.md`를 읽어라
 
 ## 기록 (티어 2만)
 
