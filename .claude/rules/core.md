@@ -7,7 +7,7 @@
 | 참조 문서 | 언제 읽는가 |
 |---|---|
 | `.claude/ref/troubleshooting.md` | 명령이 실패했거나 증상의 원인을 모를 때 |
-| `.claude/ref/testing-traps.md` | 라이브러리가 테스트에서 예상과 다르게 동작할 때 |
+| `.claude/ref/testing-traps.md` | 테스트가 예상과 다르게 동작할 때. 통과만 하는 테스트를 의심할 때 |
 | `.claude/ref/parallel.md` | 트랙을 나눠 병렬로 돌리기로 정한 뒤에만 |
 | `.claude/ref/incidents.md` | 이 규약이 왜 이렇게 생겼는지 근거가 필요할 때 |
 
