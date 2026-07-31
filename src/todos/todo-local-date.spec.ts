@@ -1,4 +1,5 @@
 import {
+  formatLocalDateKey,
   parseLocalDateKey,
   toHistoriedOn,
   toLocalDateKey,
@@ -274,5 +275,42 @@ describe('parseLocalDateKey', () => {
 
   it('평년 2월 29일은 던진다', () => {
     expect(() => parseLocalDateKey('2026-02-29')).toThrow(RangeError);
+  });
+});
+
+describe('formatLocalDateKey', () => {
+  // `parseLocalDateKey`의 반대 방향이다. `@db.Date` 컬럼에서 읽은 값을 클라이언트에
+  // 내보낼 때 쓴다 — `Date`를 그대로 내보내면 받는 쪽이 자기 로컬 타임존으로
+  // 해석해서 음수 오프셋 지역에서 하루 앞으로 밀려 보인다.
+  it('UTC 자정 Date를 YYYY-MM-DD로 돌려준다', () => {
+    expect(formatLocalDateKey(new Date('2026-08-01T00:00:00.000Z'))).toBe(
+      '2026-08-01',
+    );
+  });
+
+  it('한 자리 월·일을 0으로 채운다', () => {
+    expect(formatLocalDateKey(new Date('2026-01-05T00:00:00.000Z'))).toBe(
+      '2026-01-05',
+    );
+  });
+
+  it('parseLocalDateKey와 왕복한다', () => {
+    // 두 함수가 같은 표현을 쓴다는 것을 고정한다. 한쪽만 형식을 바꾸면 깨진다.
+    expect(formatLocalDateKey(parseLocalDateKey('2026-12-31'))).toBe(
+      '2026-12-31',
+    );
+  });
+
+  it('UTC 자정이 아니면 던진다', () => {
+    // `completedAt`이나 `shouldDoAt` 같은 시각 컬럼(`Timestamptz`)을 실수로 넘기면
+    // UTC 기준 날짜가 나오는데, 그것은 유저 타임존 기준 날짜가 아니라서 조용히
+    // 어긋난다. 시각에서 날짜를 뽑아야 한다면 `toLocalDateKey`를 먼저 거쳐야 한다.
+    expect(() =>
+      formatLocalDateKey(new Date('2026-08-01T09:00:00.000Z')),
+    ).toThrow(RangeError);
+  });
+
+  it('유효하지 않은 Date면 던진다', () => {
+    expect(() => formatLocalDateKey(new Date('쓰레기'))).toThrow(RangeError);
   });
 });

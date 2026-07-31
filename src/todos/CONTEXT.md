@@ -4,7 +4,7 @@
 
 ## 역할
 
-할 일(todo) 도메인이다. 두 테이블에 접근하는 Repository와, 두 테이블이 함께 쓰는 **날짜 계산**을 담당한다. Service·Controller·DTO는 아직 없다.
+할 일(todo) 도메인이다. 두 테이블에 접근하는 Repository와, 두 테이블이 함께 쓰는 **날짜 계산**, 그리고 저장된 행을 **밖으로 내보낼 형태로 바꾸는 순수 함수**를 담당한다. Service·Controller·DTO는 아직 없다.
 
 ## 먼저 알아야 할 구조
 
@@ -22,8 +22,10 @@
 
 | 파일명 | 역할 |
 |--------|------|
-| `todo-local-date.ts` | 날짜 컬럼에 넣을 값을 만드는 함수 셋. **이 폴더 밖에서 `Date`를 직접 만들지 않게 하는 것이 목적이다** |
+| `todo-local-date.ts` | 날짜 컬럼에 넣을 값을 만드는 함수 넷. **이 폴더 밖에서 `Date`를 직접 만들지 않게 하는 것이 목적이다** |
 | `todo-local-date.spec.ts` | 자정 경계, 일회성 키의 불변성, 날짜 문자열 검증 |
+| `todo-view.ts` | 저장된 행을 밖으로 내보낼 형태로 바꾸는 순수 함수와 그 타입 |
+| `todo-view.spec.ts` | `null`과 `0`의 구별, `Decimal` 변환, 반복 방식별 상세 형태 |
 | `todo-templates.repository.ts` | 할 일 정의 접근. 만들기·읽기·고치기·삭제 + 목록 조회 두 가지 |
 | `todo-histories.repository.ts` | 완료 기록 접근 |
 | `todo-errors.ts` | Repository가 던지는 도메인 오류. 위 계층이 타입으로 구분한다 |
@@ -49,13 +51,22 @@ Repository의 검증은 `test/todos.e2e-spec.ts`가 실제 DB에 붙어서 한�
 
 ## 날짜 계산
 
-날짜를 만드는 함수가 셋이고 쓰임이 다르다.
+날짜를 만드는 함수가 넷이고 쓰임이 다르다. 앞 셋은 `Date`를 만들고 마지막 하나는 반대 방향으로 문자열을 만든다.
 
 | 함수 | 언제 쓰는가 | 대상 |
 |---|---|---|
 | `toHistoriedOn({ completeType, createdAt, performedAt, timeZone })` | **완료 기록 날짜를 만드는 유일한 통로** | `todo_history.historied_on` |
 | `toLocalDateKey(instant, tz)` | 조회에 넘길 "오늘"을 계산할 때 | `findDailyActiveOn`의 인자 |
 | `parseLocalDateKey('2026-08-01')` | 사용자가 **고른 날짜**를 받을 때 | `active_from`, `active_until` |
+| `formatLocalDateKey(dateKey)` | 날짜 컬럼에서 읽은 값을 **밖으로 내보낼 때** | 응답의 `activeFrom`·`activeUntil`·`historiedOn` |
+
+### 날짜를 문자열로 내보내는 이유
+
+`@db.Date` 컬럼에서 읽은 값은 UTC 자정을 가리키는 `Date`다. 그대로 내보내면 받는 쪽이 자기 로컬 타임존으로 해석하는데, UTC 자정은 음수 오프셋 지역에서 **전날 오후**라 8월 1일 시작인 할 일이 7월 31일 시작으로 보인다. 날짜만 있고 시각이 없는 값에는 애초에 타임존이 없으므로 `YYYY-MM-DD` 문자열이 옳은 표현이다.
+
+**`formatLocalDateKey`는 UTC 자정이 아닌 `Date`를 거절한다.** `completedAt`이나 `shouldDoAt` 같은 시각 컬럼(`Timestamptz`)을 실수로 넘기면 UTC 기준 날짜가 나오는데, 그 값은 유저 타임존 기준 날짜와 어긋난다 — 한국 시간대 오전에 완료한 기록은 UTC로도 같은 날이라 맞아 보이다가, **저녁에 완료한 기록에서만 하루 어긋난다.** 시각에서 날짜를 뽑아야 한다면 `toLocalDateKey`를 먼저 거쳐야 한다.
+
+구현이 `toISOString()`을 자르는 것도 같은 방향이다. `getFullYear`·`getMonth`·`getDate`로 조립하면 로컬 타임존에서 하루 밀리는 함정이 되살아나는데, **한국 시간대(UTC+9)에서는 그 실수가 테스트에 드러나지 않는다** — UTC 자정의 로컬 날짜가 같은 날이기 때문이다. `toISOString`에는 로컬 변형이 없어서 그 함정 자체가 없다.
 
 ### 왜 `toHistoriedOn` 하나로 모았나
 
@@ -122,6 +133,69 @@ Repository의 검증은 `test/todos.e2e-spec.ts`가 실제 DB에 붙어서 한�
 
 **Repository가 던지는 도메인 오류는 `todo-errors.ts`에 있다.** 일반 `Error`로 던지면 NestJS가 500으로 바꿔 사용자에게 "서버 오류"로 보이고, 메시지 문자열로 구분하게 두면 문구를 다듬는 순간 그 구분이 조용히 깨진다. Service가 `instanceof`로 잡아 알맞은 HTTP 예외로 바꾼다.
 
+## 밖으로 내보내는 형태 (`todo-view.ts`)
+
+**Prisma 모델을 그대로 내보내지 않는다.** 이유가 셋이고 성질이 다르다.
+
+- **`Prisma.Decimal`이 새어 나간다.** 런타임 클래스라 JSON으로 나갈 때 내부 표현이 드러나고 받는 쪽 형태가 Prisma 구현에 묶인다. `number`로 바꿔도 값이 달라지지 않는다 — `@db.Decimal(12, 2)`는 소수점 이하를 포함해 유효자리가 최대 **12자리**이고(Postgres `numeric(p, s)`의 `p`가 전체 자리다), 배정밀도 부동소수점이 정확히 담는 것은 15자리다. **3자리 여유가 있다** — 컬럼 정밀도를 늘릴 일이 생기면 이 여유부터 확인해라. **기본키(`bigint`)는 그대로 둔다.** `src/common/bigint-json.ts`가 문자열로 직렬화하고, `Number`로 바꾸면 2^53을 넘는 번호에서 다른 행을 가리킨다
+- **날짜 컬럼의 `Date`는 하루 밀려 보인다.** 위 "날짜를 문자열로 내보내는 이유"가 그 설명이다
+- **`userId`와 `deletedAt`이 붙어 나간다.** 자기 것만 조회하므로 소유자 번호는 쓸 데가 없고, 응답에 다른 유저의 번호가 새는 경로를 구조적으로 없앤다
+
+**완료 여부(`isCompleted`)는 저장된 값이 아니라 여기서 계산한다.** 저장된 것은 완료 시각 하나다(`isCompleted` 컬럼을 두면 두 값이 어긋날 수 있다). 그 해석을 화면마다 반복하면 한쪽만 고쳐지는 날이 온다.
+
+**`progress`가 `null`이면 아직 손대지 않았다는 뜻이다.** 기록은 완료하거나 진행값을 입력할 때 비로소 생기므로 빈 객체로 바꾸면 진행값 0을 입력한 상태와 구별되지 않는다. 같은 이유로 `progressValue`의 `0`과 `null`도 다르다.
+
+### "없음"을 판정할 때 느슨한 비교(`== null`)를 쓴다
+
+`todo-view.ts`가 `null`과 `undefined`를 함께 잡는다. 취향이 아니라 이 프로젝트 설정 때문이다.
+
+`tsconfig.json`이 **`strictNullChecks: false`**이고 `noUncheckedIndexedAccess`도 켜져 있지 않다. 그래서 **빈 배열의 첫 항목(`histories[0]`)이 `TodoHistory` 타입으로 통과한다** — 실제 값은 `undefined`인데 컴파일러가 아무 진단도 내지 않는다. 그리고 목록 조회가 넘기는 값이 정확히 그것이다(`findDailyActiveOn`이 붙여 주는 `histories`는 0개 또는 1개다). **"아직 손대지 않은 할 일"은 예외적인 입력이 아니라 매일 반복 목록에서 가장 흔한 상태다.**
+
+엄격한 비교(`=== null`)로 두면 두 방향으로 잘못되고, **성질이 다르다.**
+
+- **값을 읽는 자리**(`progressValue`·`targetValue`·날짜 컬럼)에서는 `Cannot read properties of undefined`로 터진다. 조건이 맞으면 목록 조회 전체가 500으로 떨어진다
+- **없음을 판정하는 자리**(`completedAt`)에서는 **뜻이 뒤집힌다.** 속성이 빠진 객체가 "완료"로 읽혀 **하지 않은 일이 완료로 표시되고 오류는 나지 않는다.** 이쪽이 더 나쁘다
+
+**문서화 주석으로 "없으면 `null`을 넘겨라"라고 계약을 적는 것으로는 부족하다.** 컴파일러가 검사해 주지 않는 계약은 사람의 기억에만 달려 있고, 어기면 위 둘 중 하나가 된다.
+
+**단순 전달 필드까지 `?? null`을 붙이지는 않았다.** `description`·`remindAt`·`title`처럼 값을 읽지도 판정하지도 않고 그대로 옮기는 자리는 `undefined`가 나가도 JSON에서 필드가 빠질 뿐 터지거나 뒤집히지 않는다. 막은 것은 **터지는 자리와 뜻이 뒤집히는 자리**다.
+
+**이 파일의 분기 커버리지가 100퍼센트로 나오는 것이 이 구멍을 가렸다** — `undefined`는 새 분기가 아니라 기존 분기의 잘못된 쪽으로 흘러가기 때문이다. 숫자를 믿지 마라.
+
+**`progress`의 목표치는 기록에 복사된 값이고 항목 최상위의 목표치는 정의의 현재 값이다.** 이름이 같아 헷갈리지만 의미가 다르다 — 목표를 5에서 8로 올렸을 때 5를 채웠던 날의 달성률이 소급해 바뀌지 않게 하려고 기록에 복사해 둔 것이므로, 지난 기록을 그릴 때 정의 쪽 값을 읽으면 그 장치가 무의미해진다.
+
+### 상세 조회는 반복 방식으로 갈리는 합집합이다
+
+`TodoDetail`이 `OnceTodoDetail | DailyTodoDetail`이고, **일회성 갈래에는 이력 배열이 아예 없다.** 옵셔널 배열로 두면 빈 배열이 "기록이 없다"와 "일회성이라 주지 않는다"를 겹쳐 뜻한다. 반대로 매일 반복 갈래에는 `progress`가 없다 — 날짜마다 상태가 다른데 하나를 골라 담으면 어느 날짜의 것인지가 결과에 드러나지 않는다.
+
+두 갈래에 `histories?: never`와 `progress?: never`를 각각 넣어 둔 것은 **합집합 타입에서 다른 갈래의 필드를 넣은 객체 리터럴이 통과하기 때문이다.** 없으면 그 규칙이 조용히 깨진다.
+
+**변환 함수가 반복 방식을 타입으로 요구한다.** `toOnceTodoDetail`은 `OnceTodoTemplate`(`completeType`이 `'ONCE'`로 좁혀진 정의)만 받고 `toDailyTodoDetail`은 `DailyTodoTemplate`만 받는다. 반복 방식에 맞지 않는 변환이 컴파일되지 않게 하는 장치이고, `todo-view.spec.ts`가 `@ts-expect-error`로 그 금지를 고정한다.
+
+### 넓은 정의를 상세 변환에 넘기려면 `narrowByCompleteType`을 거친다
+
+**조건 분기만으로는 좁혀지지 않는다.** `TodoTemplate`은 판별 속성을 가진 합집합이 아니라 단일 객체 타입이라, `if (template.completeType === 'ONCE')` 안쪽에서도 `template` 자체의 타입은 그대로 남는다 — `completeType` **속성만** 좁혀진다. 그래서 Repository가 돌려준 값을 그대로 `toOnceTodoDetail`에 넘기면 `TS2345`로 거절된다. tsc 5.9.3으로 실측한 결과이고, 이것을 모르면 가장 짧은 우회가 `template as OnceTodoTemplate`이 되어 **위 방어가 그것이 필요한 유일한 지점에서 사라진다.**
+
+`narrowByCompleteType(template)`이 그 자리를 맡는다. 결과가 `OnceTodoTemplate | DailyTodoTemplate` 합집합이므로 부르는 쪽이 `narrowed.completeType`으로 분기하는 것만으로 좁힘이 성립한다.
+
+**런타임 동작이 없다. 본문이 `return template;` 한 줄이고 반환 타입 애노테이션이 전부다.** 이상해 보이지만 이유가 있다 — TypeScript는 어떤 값을 **합집합 타입에 할당**할 때 소스의 판별 속성이 유한한 리터럴 합집합이면 값별로 쪼개어 대상의 각 멤버에 맞춰 본다. 그래서 `TodoTemplate`이 이 합집합에 그대로 들어간다. 반면 **함수 인자 자리**는 매개변수 타입이 `OnceTodoTemplate` 하나뿐이라 쪼개 맞출 대상이 없어 거절된다. 그 차이가 이 함수의 존재 이유다.
+
+**전개(`{ ...template, completeType }`)로 복사하지 않는다.** 복사해도 동작은 같지만 원본과 다른 객체가 되고, 그러면 "참조 동일성을 기대하지 마라"는 **지킬 필요가 없는 제약을 문서로 관리**해야 한다. 복사하지 않으면 지킬 것이 없다.
+
+**사용자 정의 타입 가드(`t is OnceTodoTemplate`)로는 반쪽만 해결된다.** 참인 갈래는 좁혀지지만 거짓인 갈래는 그대로다 — 교차 타입은 합집합에서 빼낼 수 있는 형태가 아니라서 `else` 쪽이 여전히 넓은 `TodoTemplate`이다. **타입 가드를 추가하는 방향으로 되돌리지 마라.**
+
+위 셋(조건 분기·`return template;`·타입 가드)은 모두 tsc 5.9.3에서 실측했다.
+
+**`@ts-expect-error` 테스트만으로는 이 경로가 지켜지지 않는다.** 그 테스트가 넘기는 값은 픽스처가 이미 리터럴 타입으로 반환한 것이고, `findById`가 돌려주는 넓은 타입이 아니다. 그래서 `todo-view.spec.ts`의 `narrowByCompleteType` 절이 **넓은 정의를 들고 분기하는 실제 경로를 재현해** 컴파일과 동작을 함께 고정한다.
+
+### 이 좁힘 장치가 막지 못하는 것 둘
+
+**`include`로 붙은 관계를 타입에서 잃는다.** `DailyTemplateWithHistory`를 넘기면 반환값에서 `histories`에 접근할 때 `TS2339`가 난다. 상세 조회는 `findById`를 쓰고 그쪽에 `include`가 없어 문제가 없지만, **목록 경로에서 좁힘을 시도하면 여기서 멈춘다.** 조용히 잘못되지 않고 컴파일이 깨져 드러난다.
+
+**손으로 만든 가짜 좁힘은 막을 수 없다.** `{ ...dailyRow, completeType: 'ONCE' }`가 런타임 검사 없이 `OnceTodoTemplate`으로 통과한다. TypeScript에서 닫을 수 없고, 실제로 `todo-view.spec.ts`의 픽스처가 그렇게 만든다. 그래서 `NarrowedTodoTemplate`을 **"그 타입을 가진 값은 반드시 그 함수를 거쳤다"로 읽으면 사실과 다르다** — 막아 주는 것은 반복 방식이 어긋난 값을 **실수로** 넘기는 것까지다.
+
+**이력 항목을 만드는 함수(`toTodoHistoryItem`)는 내보내지 않는다.** 완료 기록에는 반복 방식이 저장되지 않으므로, 그 함수를 열어 두면 **일회성 기록의 `historiedOn`(중복 방지 키)이 표시용 날짜로 나가는 코드가 타입 검사를 통과한다.** 매일 반복 정의를 요구하는 `toDailyTodoDetail`을 유일한 통로로 두면 그 경로가 막힌다 — `toHistoriedOn`을 히스토리 키의 유일한 진입점으로 둔 것과 같은 장치다.
+
 ## 아직 없는 것
 
 - **Service·Controller·DTO.** `TodosModule`이 Repository를 밖으로 내보내는 것은 그때까지의 임시 상태다. Service가 들어오면 Repository는 내보내지 말아야 한다 — 그렇지 않으면 다른 도메인이 Repository를 직접 불러 규칙을 건너뛴다
@@ -132,4 +206,4 @@ Repository의 검증은 `test/todos.e2e-spec.ts`가 실제 DB에 붙어서 한�
 
 - `@nestjs/common` — `Injectable`, `Module`
 - `src/prisma/prisma.service.ts` — Repository가 생성자로 주입받는다
-- `src/generated/prisma` — 모델과 enum 타입. `todo-local-date.ts`는 `CompleteType`을 **타입으로만** 가져와 실행 시점 의존이 없다
+- `src/generated/prisma` — 모델과 enum 타입. `todo-local-date.ts`와 `todo-view.ts`는 **타입으로만** 가져와 실행 시점 의존이 없다. `todo-view.ts`가 `Prisma.Decimal`을 값으로 import하지 않고 `toNumber()`만 부르는 것도 그래서다

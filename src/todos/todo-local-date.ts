@@ -153,3 +153,40 @@ export function parseLocalDateKey(isoDate: string): Date {
 
   return key;
 }
+
+/**
+ * 날짜 키(`UTC 자정 Date`)를 `"2026-08-01"` 형식 문자열로 바꾼다. `parseLocalDateKey`의
+ * 반대 방향이고, **`@db.Date` 컬럼에서 읽은 값을 밖으로 내보낼 때 쓴다.**
+ *
+ * `Date`를 그대로 내보내면 받는 쪽이 자기 로컬 타임존으로 해석한다. UTC 자정은 음수
+ * 오프셋 지역에서 **전날 오후**이므로, 8월 1일 시작인 할 일이 7월 31일 시작으로 보인다.
+ * 날짜만 있고 시각이 없는 값에는 애초에 타임존이 없으므로 문자열이 옳은 표현이다.
+ *
+ * 구현이 `toISOString`을 자르는 것은 그 함수에 로컬 컴포넌트를 쓸 변형이 없기 때문이다.
+ * `getFullYear`/`getMonth`/`getDate`로 조립하면 로컬 타임존에서 하루 밀리는 함정이
+ * 되살아나고, **한국 시간대(UTC+9)에서는 그 실수가 테스트에 드러나지도 않는다**
+ * (UTC 자정의 로컬 날짜가 같은 날이다).
+ *
+ * @throws {RangeError} `dateKey`가 유효하지 않거나 UTC 자정이 아닐 때
+ */
+export function formatLocalDateKey(dateKey: Date): string {
+  if (Number.isNaN(dateKey.getTime())) {
+    throw new RangeError(
+      'formatLocalDateKey: 유효하지 않은 Date가 넘어왔다 (Invalid Date)',
+    );
+  }
+
+  // UTC 자정이 아닌 값을 거절한다. 시각 컬럼(`Timestamptz`)인 `completedAt`이나
+  // `shouldDoAt`을 실수로 넘기면 UTC 기준 날짜가 나오는데, 그 값은 유저 타임존 기준
+  // 날짜와 어긋난다 — KST 오전 9시에 완료한 기록이 UTC로는 자정 직후라 날짜가
+  // 같아 보이다가, 저녁에 완료한 기록에서만 하루 어긋난다. 시각에서 날짜를 뽑아야
+  // 한다면 `toLocalDateKey`를 먼저 거쳐야 한다.
+  if (dateKey.getTime() % 86_400_000 !== 0) {
+    throw new RangeError(
+      `formatLocalDateKey: UTC 자정이 아닌 Date다 (${dateKey.toISOString()}). ` +
+        '시각에서 날짜를 뽑으려면 toLocalDateKey를 먼저 거쳐라',
+    );
+  }
+
+  return dateKey.toISOString().slice(0, 10);
+}
