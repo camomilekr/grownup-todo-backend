@@ -15,6 +15,7 @@ model: inherit
 
 - **기술 용어와 코드 식별자는 원문 그대로 둔다.** 파일 경로, 함수명, 타입명은 백틱으로 감싼다
 - **도구 출력과 오류 메시지는 원문을 그대로 인용한다.** 인용한 뒤 한국어로 해석을 붙여라
+- **축약어를 쓰지 않는다.** 처음 한 번만 풀고 그 뒤 줄이는 것도 안 된다 — 뒤를 읽는 사람이 앞으로 돌아가 찾아야 한다. 줄일 수밖에 없으면 `RNTL(React Native Testing Library)`처럼 괄호로 원어를 붙인다. 상세는 `.claude/rules/core.md`의 "쓰는 방식"
 
 ## 절대 구현하지 않는다
 
@@ -148,8 +149,8 @@ docs/plan/{YYYY-MM-DD}-{브랜치 이름에서 feature/를 뗀 부분}.md
 
 | 경로 | 현재 역할 | 이번에 어떻게 바뀌는가 |
 |---|---|---|
-| `src/store/todoTypes.ts` | 도메인 타입 선언 | 필드 추가 |
-| `src/utils/foo.ts` (신규) | — | 새 판정 함수 |
+| `src/todos/todo-templates.repository.ts` | 정의 테이블 접근 | 조회 메서드 추가 |
+| `src/todos/todo-status.ts` (신규) | — | 새 판정 함수 |
 
 - **밟을 수 있는 함정**: (`CONTEXT.md`·`.claude/ref/`에서. 출처를 함께 적는다)
 

@@ -114,7 +114,7 @@ git switch develop && git pull && git switch -c feature/fix-midnight-rollover
 
 ```bash
 npm run verify                                   # lint → prettier → typecheck. 2초. pre-commit 훅도 이것을 돌린다
-git add src/store/todoTypes.ts src/store/CONTEXT.md
+git add src/todos/todo-templates.repository.ts src/todos/CONTEXT.md
 git commit
 git push -u origin feature/step-goal-presets
 gh pr create --base develop                      # base를 반드시 명시한다
@@ -144,9 +144,25 @@ gh pr create --base develop                      # base를 반드시 명시한�
 .claude/scripts/worktree-drop.sh step-goal-presets     # docs/를 저장소 루트로 꺼낸 뒤 정리한다
 ```
 
+## 쓰는 방식 — 축약하지 않는다
+
+**이 규칙은 코드 주석만이 아니라 내놓는 글 전부에 적용된다.** 사용자 응답, 커밋 메시지, PR 본문, 리뷰 답글, 계획서, `CONTEXT.md`, 에이전트끼리 주고받는 보고까지다. 커밋 메시지와 PR 본문은 **저장소에 영구히 남으므로** 특히 그렇다.
+
+**축약어를 쓰지 않는 것이 기본이다.** 줄여서 아끼는 글자 수보다, 읽는 사람이 멈춰서 되짚는 비용이 크다.
+
+- **처음 한 번 풀고 그 뒤로 줄이는 것도 안 된다.** 그러면 뒤를 읽는 사람이 앞으로 돌아가 찾아야 한다. 실제로 `RN`을 첫 문장에서 "React Native"로 풀고 그 뒤 계속 줄여 써서 사용자가 "RN이 뭐야"를 물었다. **같은 글 안에서도 반복해서 풀어 쓴다** — 표·목록·코드 블록 주석에서 다시 나올 때는 특히
+- **줄일 수밖에 없다면 괄호로 원어를 붙인다.** `RNTL(React Native Testing Library)`처럼
+- **널리 쓰이는 것도 이 저장소 밖에서 온 것이면 푼다.** `DTO`, `RLS`, `FK`, `PK`, `TDD`처럼 익숙해 보이는 것도 처음 접하는 사람에게는 암호다
+- **오류 코드와 식별자는 그대로 쓰되 뜻을 옆에 적는다.** `P2002`(고유 제약 위반), `P2025`(고칠 행을 찾지 못했다)처럼
+- **줄임말로 된 프로젝트 내부 용어도 마찬가지다.** "티어 2", "지문", "관문" 같은 말을 사용자에게 쓸 때는 무엇을 뜻하는지 한 번 적는다
+
+**결론보다 상황을 먼저 쓴다.** "이런 일이 생길 수 있다 → 그래서 이렇게 했다" 순서다. 결론만 압축해 던지면 그 결론이 답하는 질문이 사라진다.
+
+**표는 이미 문장으로 설명한 것을 정리할 때만 쓴다.** 표로 처음 설명하면 각 칸이 무슨 말인지 알 수 없다.
+
 ## 코드 작성
 
-- **TDD로 한다.** 실패하는 테스트를 먼저 쓰고 **실패를 실제로 확인한 뒤** 통과시킨다. 버그 수정은 재현 테스트부터. 상세는 `.claude/rules/testing.md`
+- **TDD**(실패하는 테스트를 먼저 쓰고 통과시키는 방식)**로 한다.** 실패하는 테스트를 먼저 쓰고 **실패를 실제로 확인한 뒤** 통과시킨다. 버그 수정은 재현 테스트부터. 상세는 `.claude/rules/testing.md`
 - 주석과 문서(JSDoc 등)는 **한국어**로 쓴다. 주석에는 **왜**를 적는다
 - `src/` 하위 폴더를 건드리기 전에 그 폴더의 `CONTEXT.md`를 읽고, 끝난 뒤 갱신한다(`.claude/rules/CONTEXT.md`)
 - 규칙을 끄거나 낮출 때는 반드시 이유를 주석으로 남긴다
