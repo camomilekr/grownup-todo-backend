@@ -83,8 +83,16 @@ DTO 계층이 생기는 라운드가 **이 넷을 한 묶음으로** 처리해�
 |---|---|---|
 | `app_user.email` | `trim()` + `toLowerCase()` | 같은 사람이 두 계정을 갖는다 |
 | `app_user.time_zone` | IANA 이름인지 (`Intl.supportedValuesOf('timeZone')`) | `toLocalDateKey`가 `RangeError`를 던져 **그 유저의 모든 날짜 계산이 영구히 실패한다** |
-| `todo_template.remind_at` | `/^([01]\d\|2[0-3]):[0-5]\d$/` | 스캔이 문자열 동등 비교라 **에러 없이 영원히 알림이 오지 않는다** |
+| `todo_template.remind_at` | `HH:mm` 형식인지 (00~23시, 00~59분). 정규식은 표 아래에 | 스캔이 문자열 동등 비교라 **에러 없이 영원히 알림이 오지 않는다** |
 | `todo_template.active_from`/`active_until` | 날짜 문자열 → `parseLocalDateKey` | 손으로 만든 `Date`는 하루 밀려 저장된다 |
+
+`remind_at`에 쓸 정규식이다. 표 안에 두면 마크다운이 파이프를 열 구분자로 읽어 표가
+깨지므로(이스케이프하면 렌더링은 되지만 raw 텍스트에서 복사하면 틀린 식이 된다) 여기에
+따로 둔다. **복사해서 그대로 쓰면 된다.**
+
+```ts
+@Matches(/^([01]\d|2[0-3]):[0-5]\d$/)
+```
 
 **`@db.Date` 컬럼(`historied_on`, `active_from`, `active_until`)에 넘기는 `Date`는 UTC 컴포넌트로 직렬화된다.** `@prisma/adapter-pg`의 `formatDate`가 `getUTCFullYear`/`getUTCMonth`/`getUTCDate`를 쓴다. 로컬 타임존 자정 `Date`를 넘기면 하루가 밀리므로 **손으로 만들지 말고** `src/todos/todo-local-date.ts`의 세 함수(`toHistoriedOn`·`toLocalDateKey`·`parseLocalDateKey`)가 만든 값을 쓴다. 히스토리 키는 **반드시 `toHistoriedOn`**을 거친다 — `completeType`에 따라 규칙이 갈리고 그 선택을 호출자에게 맡기면 틀려도 아무것도 실패하지 않는다.
 
