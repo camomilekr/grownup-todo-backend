@@ -43,7 +43,7 @@ rm: .claude/worktrees/step-goal-presets/node_modules: Directory not empty
 
 ## 워크트리를 격리하는 것은 설정이 아니라 점 디렉터리다
 
-**`.claude/worktrees/`를 제외하는 설정이 어디에도 없다.** 확인한 결과다 — `.prettierignore`에는 `/src/generated`·`/dist`·`/coverage`만, `.eslintrc.js`의 `ignorePatterns`에는 `.eslintrc.js`·`src/generated/**`만, jest 설정(`package.json`)에는 아무것도 없다. `.gitignore`에도 없다.
+**검사 도구 쪽에는 `.claude/worktrees/`를 제외하는 설정이 하나도 없다.** 확인한 결과다 — `.prettierignore`에는 `/src/generated`·`/dist`·`/coverage`만, `.eslintrc.js`의 `ignorePatterns`에는 `.eslintrc.js`·`src/generated/**`만, jest 설정(`package.json`)에는 `coveragePathIgnorePatterns: ["/generated/"]`뿐이다.
 
 그런데도 충돌이 나지 않는다. **`.claude/`가 점으로 시작해서 도구들이 기본적으로 건너뛰기 때문이다.**
 
@@ -57,7 +57,26 @@ rm: .claude/worktrees/step-goal-presets/node_modules: Directory not empty
 
 **루트 `tsconfig.json`에 워크트리를 포함시켜 해결하려 하지 마라.** 루트에서 `verify`를 돌릴 때 같은 클래스가 두 번 선언된 것으로 보인다.
 
-`docs/`도 `.gitignore`에 없다. 규약은 "`docs/`는 추적되지 않는다"를 전제하는데 실제로는 추적 대상이므로, **`git add -A`를 쓰면 계획서와 개발 기록이 저장소에 들어간다.** 커밋할 파일을 경로로 지정해라.
+### git은 워크트리를 자동으로 무시하지 않는다
+
+**점 디렉터리 격리는 lint·포맷·타입 검사에만 통하고 git에는 통하지 않는다.** 워크트리가 하나라도 있으면 부모 저장소의 `git status`에 미추적으로 올라온다.
+
+```
+$ git status --porcelain
+?? .claude/worktrees/
+```
+
+여기서 `git add -A`를 쓰면 워크트리가 **embedded git repository로 커밋된다** — 경고는 나오지만 막아 주지는 않는다.
+
+```
+warning: adding embedded git repository: .claude/worktrees/__probe
+```
+
+들어가는 것은 파일이 아니라 gitlink 하나여서 diff에 내용이 보이지 않고, 그래서 **눈치채기 어렵다.** 워크트리 디렉터리가 비어 있는 동안에는 `git status`에도 나오지 않아(git이 빈 디렉터리를 무시한다) 평소에 확인해 두기도 어렵다.
+
+그래서 **`.gitignore`에 `/.claude/worktrees/`를 넣어 1차 방어선을 뒀다.** 규약이 `git add -A`를 금지하는 것만으로는 실수 한 번을 막지 못한다. 워크트리 안에서 작업할 때는 이 패턴이 워크트리 루트 기준으로 해석되므로 그 안의 `src/`는 영향받지 않는다.
+
+**`docs/`는 여전히 `.gitignore`에 없다.** 넣지 않은 이유는 `docs/todo-schema.md`처럼 추적해야 하는 문서가 같은 폴더에 있어서다. 즉 계획서와 개발 루프 기록은 "무시되는" 것이 아니라 **커밋하지 않기로 한 것뿐**이고, `git add -A`를 쓰면 그대로 들어간다. **커밋할 파일을 경로로 지정해라.**
 
 ## lint · 포맷
 

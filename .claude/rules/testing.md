@@ -13,12 +13,12 @@
 
 우선순위가 높은 순서다.
 
-1. **`utils/`의 순수 함수** — 가장 값싸고 확실하다. 분기마다 테스트를 쓴다
+1. **순수 함수** — 가장 값싸고 확실하다. 분기마다 테스트를 쓴다. 이 저장소에는 `utils/` 폴더가 없고 계산 함수가 도메인 폴더 안에 산다(`src/todos/todo-local-date.ts`가 그 예다)
 2. **경계 조건** — 날짜 경계, 빈 배열, `null`과 `0`의 구별, 범위의 양 끝
-3. **컴포넌트의 관찰 가능한 동작** — 화면에 무엇이 보이는지, 탭하면 어떤 콜백이 불리는지
+3. **Service의 관찰 가능한 동작** — 무엇을 반환하는지, 어떤 예외를 던지는지, 어떤 입력을 거절하는지
 4. **버그 재현** — 한 번 발생한 버그는 테스트로 고정한다
 
-테스트하지 않는 것: 구현 세부사항(내부 state 이름, 호출 순서), 스타일 값, 서드파티 라이브러리의 동작.
+테스트하지 않는 것: 구현 세부사항(호출 순서, 내부 필드 이름), 서드파티 라이브러리의 동작, 프레임워크 배선 자체(모듈이 Provider를 등록했는지를 단정하는 테스트는 NestJS를 검증하는 것이다).
 
 ## 파일 배치와 이름
 
@@ -38,8 +38,11 @@ src/todos/todo-local-date.spec.ts
 - 픽스처는 **필요한 필드만 덮어쓰는 생성 함수**로 만든다
 
   ```ts
-  function createTodo(overrides: Partial<Todo> = {}): Todo {
-    return { id: 'test-id', title: '테스트 할 일', /* ... */ ...overrides };
+  function createTemplate(
+    overrides: Partial<TodoTemplate> = {},
+  ): TodoTemplate {
+    // 기본키가 BIGSERIAL이라 id는 bigint다. 숫자 리터럴을 넣으면 타입이 어긋난다
+    return { id: 1n, title: '테스트 할 일', /* ... */ ...overrides };
   }
   ```
 

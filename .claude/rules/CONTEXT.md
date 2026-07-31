@@ -29,7 +29,7 @@
 
 | 파일명 | 역할 |
 |--------|------|
-| Foo.js | ... |
+| `todos.service.ts` | ... |
 
 ## 핵심 로직
 
@@ -44,5 +44,5 @@
 
 - 실제 코드가 있는 `src/` 하위 폴더 각각에만 `CONTEXT.md`를 유지한다
 - 프로젝트 루트는 제외한다. 루트 `CONTEXT.md`는 만들지 않는다
-- `node_modules/`, `assets/` 등 자동 생성·관리되는 폴더는 제외한다
+- **자동 생성·관리되는 폴더는 제외한다.** 이 저장소에서 그에 해당하는 것은 `src/generated/prisma`다 — `prisma generate`가 다시 만드는 산출물이고 `.gitignore`에 들어 있다. 손으로 쓴 문서를 그 안에 두면 다음 생성에서 사라진다
 - 설정 파일(`package.json`, `tsconfig.json`, `prisma.config.ts` 등)만 변경하는 작업은 이 규칙의 대상이 아니다

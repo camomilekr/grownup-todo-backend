@@ -8,7 +8,7 @@
 
 **파일 사이로는 넘어가지 않는다.** jest는 테스트 **파일마다 별도의 실행 문맥**을 새로 만들고, `BigInt`·`Array` 같은 표준 내장 객체는 그 문맥마다 **다른 객체**다. A 파일에서 `BigInt.prototype.toJSON`을 심어도 B 파일의 `BigInt.prototype`에는 흔적이 없다.
 
-근거는 `node_modules/jest-environment-node/build/index.js`에 있다. 부모 프로세스의 전역을 테스트 문맥으로 복사하는 반복문에 `if (!contextGlobals.has(nodeGlobalsKey))` 조건이 걸려 있어, **새 문맥이 이미 갖고 있는 전역은 복사하지 않는다.**
+근거는 `jest-environment-node` 패키지의 소스에 있다(확인 시점 29.7.0, 설치본의 `build/index.js`). 부모 프로세스의 전역을 테스트 문맥으로 복사하는 반복문에 `if (!contextGlobals.has(nodeGlobalsKey))` 조건이 걸려 있어, **새 문맥이 이미 갖고 있는 전역은 복사하지 않는다.** 경로가 아니라 **이 조건문을 검색어로 삼아라** — 버전이 오르면 파일 배치가 바뀔 수 있지만 조건 자체가 사라졌다면 그때는 위의 실측을 다시 해야 한다는 신호다.
 
 실측했다. 두 spec을 만들어 순서를 고정하고 `--runInBand`(워커 1개, 가장 오염되기 쉬운 조건)로 돌렸다.
 
@@ -58,7 +58,7 @@ TypeError: Do not know how to serialize a BigInt
 
 ## `@db.Date` 컬럼은 UTC 기준으로 저장된다
 
-`@db.Date`에 넘긴 `Date`를 어댑터가 **UTC 컴포넌트로** 직렬화한다. `node_modules/@prisma/adapter-pg/dist/index.js`의 `formatDate`가 `getUTCFullYear`·`getUTCMonth`·`getUTCDate`를 쓴다.
+`@db.Date`에 넘긴 `Date`를 어댑터가 **UTC 컴포넌트로** 직렬화한다. `@prisma/adapter-pg` 패키지의 `formatDate`가 `getUTCFullYear`·`getUTCMonth`·`getUTCDate`를 쓰기 때문이다(확인 시점 7.9.1, 설치본의 `dist/index.js`). 여기서도 경로보다 **함수 이름과 이 세 호출을 검색어로 삼아라.**
 
 그래서 로컬 컴포넌트로 만든 날짜는 **하루 밀린다.** KST에서 확인한 결과다.
 

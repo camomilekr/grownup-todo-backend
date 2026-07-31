@@ -17,6 +17,8 @@ gh pr view --json number,title,headRefName --jq '"#\(.number) \(.title) (\(.head
 
 리뷰는 세 곳에 나뉘어 있다. **셋 다 확인한다** — 인라인 코멘트만 보면 리뷰 본문의 총평을 놓친다.
 
+**`gh api`에는 `--paginate`를 반드시 붙인다.** GitHub API의 기본 페이지 크기가 30이라 그것을 넘는 코멘트가 조용히 잘린다. 잘렸다는 표시는 응답 본문에 없고 `Link` 헤더에만 있어서, 세어 보지 않으면 **전부 모았다고 착각한 채 다음 단계로 넘어간다.** 자동 리뷰어는 같은 문제를 파일마다 반복해서 달기 때문에 30건은 쉽게 넘는다. `--paginate`와 `--jq '.[] | ...'`는 함께 써도 정상 동작한다(페이지마다 jq를 적용해 이어 출력한다).
+
 ```bash
 OWNER_REPO=$(gh repo view --json nameWithOwner --jq .nameWithOwner)
 PR=<번호>
@@ -25,12 +27,16 @@ PR=<번호>
 gh pr view "$PR" --json reviews --jq '.reviews[] | "\(.author.login) [\(.state)]\n\(.body)\n---"'
 
 # (2) 인라인 코멘트 — 파일·줄에 붙은 지적. id가 답글에 필요하다
-gh api "repos/$OWNER_REPO/pulls/$PR/comments" \
+gh api --paginate "repos/$OWNER_REPO/pulls/$PR/comments" \
   --jq '.[] | "### id=\(.id)  \(.path):\(.line // .original_line)\n작성자: \(.user.login)\n\(if .in_reply_to_id then "답글(부모 \(.in_reply_to_id))" else "최상위" end)\n\n\(.body)\n"'
 
 # (3) PR 일반 코멘트
-gh api "repos/$OWNER_REPO/issues/$PR/comments" --jq '.[] | "\(.user.login)\n\(.body)\n---"'
+gh api --paginate "repos/$OWNER_REPO/issues/$PR/comments" --jq '.[] | "\(.user.login)\n\(.body)\n---"'
 ```
+
+**(1)의 `gh pr view`는 `--paginate`를 받지 않는다.** 내부적으로 GraphQL을 쓰고 리뷰 목록 개수를 그쪽이 정하므로, 리뷰가 많은 Pull Request라면 여기서 잘릴 수 있다. 잘린 것으로 의심되면 `gh api --paginate "repos/$OWNER_REPO/pulls/$PR/reviews"`로 다시 세어 대조한다.
+
+**지적이 인라인으로 게시되지 않고 리뷰 본문 안에만 들어 있는 경우가 있다.** 자동 리뷰어가 스스로 억제한 항목(`Suppressed comments`)이 그렇다. (2)의 조회로는 **하나도 나오지 않고** (1)의 리뷰 본문에서 접힌 영역으로만 보인다. 그러면 답글을 달 `comment_id`가 없으므로, 6단계에서 인라인 답글 대신 Pull Request 일반 코멘트로 답해야 한다. **(2)가 비어 있다고 지적이 없다고 판단하지 마라.**
 
 **이미 답한 코멘트를 다시 처리하지 않는다.** `in_reply_to_id`가 있는 항목은 답글이다. 최상위 코멘트 중 내가 이미 답글을 단 것은 건너뛴다.
 

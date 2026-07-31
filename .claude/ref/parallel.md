@@ -6,10 +6,10 @@
 
 ```
 develop
-  └─ feature/step-goal-presets            통합 브랜치 · .claude/worktrees/step-goal-presets
+  └─ feature/todo-api                    통합 브랜치 · .claude/worktrees/todo-api
        │  (선행 단계를 여기서 먼저 순차로 끝낸다)
-       ├─ feature/step-goal-presets-store  트랙 · .claude/worktrees/step-goal-presets-store
-       └─ feature/step-goal-presets-ui     트랙 · .claude/worktrees/step-goal-presets-ui
+       ├─ feature/todo-api-todos         트랙 · .claude/worktrees/todo-api-todos
+       └─ feature/todo-api-notifications  트랙 · .claude/worktrees/todo-api-notifications
 ```
 
 **PR은 통합 브랜치 하나만 낸다.**
@@ -33,7 +33,7 @@ develop
 같은 워크트리에서 `developer` 둘을 동시에 돌리면 안 된다. 파일이 겹치지 않아도 안 된다. **`verify`가 프로젝트 전역이기 때문이다.**
 
 - **TDD가 서로를 깨뜨린다.** A가 실패하는 테스트를 먼저 써 둔 상태에서 B가 `verify`를 돌리면 A 때문에 깨진다. B는 자기 코드가 잘못됐는지 알 수 없다
-- **`tsc`는 파일 단위로 나눌 수 없다.** `npm run lint`도 `eslint .`라 전역이다
+- **`tsc`는 파일 단위로 나눌 수 없다.** `npm run lint`도 마찬가지다 — 글롭이 `{src,apps,libs,test}/**/*.ts`라 A가 건드리는 파일만 골라 검사할 수 없다
 - **pre-commit 훅이 서로의 커밋을 막는다.** 우회할 수 없는 교착이다
 - **`git add -A`가 남의 파일을 삼킨다**
 
@@ -48,13 +48,15 @@ develop
 **base는 `develop`이 아니라 통합 브랜치의 현재 커밋이다.**
 
 ```bash
-.claude/scripts/worktree-new.sh step-goal-presets-store feature/step-goal-presets
-.claude/scripts/worktree-new.sh step-goal-presets-ui    feature/step-goal-presets
+.claude/scripts/worktree-new.sh todo-api-todos          feature/todo-api
+.claude/scripts/worktree-new.sh todo-api-notifications  feature/todo-api
 ```
 
 스크립트가 브랜치·`node_modules` 복제·계획서 복사·점유 표식을 함께 만든다. **트랙마다 점유 표식이 필요하다** — 병렬에서는 워크트리가 여러 개라 표식 없는 워크트리 하나가 사고의 입구가 된다.
 
-트랙 이름은 그 트랙이 맡은 계층이나 관심사로 짓는다(`store`, `ui`, `notifications`). `a`, `b`, `1`, `2`는 쓰지 않는다.
+트랙 이름은 그 트랙이 맡은 **도메인이나 관심사**로 짓는다(`todos`, `notifications`, `config`). `a`, `b`, `1`, `2`는 쓰지 않는다.
+
+**계층으로 나누지 마라.** `controller`와 `service`로 가르면 파일 집합이 같은 도메인 폴더 안에서 겹치고, 그 폴더의 `CONTEXT.md`를 양쪽이 함께 고쳐야 한다. 이 저장소는 도메인 하나가 폴더 하나이므로(`.claude/rules/nestjs.md`) **트랙 경계도 폴더 경계와 같아야 한다.**
 
 ### 3. 트랙마다 루프를 돌린다
 
@@ -70,27 +72,27 @@ develop
 `developer`에게 넘길 때 **맡은 단계와 건드릴 파일 범위**를 명시하고 마지막 문장을 빠뜨리지 마라.
 
 ```
-계획서: docs/plan/2026-07-27-step-goal-presets.md
+계획서: docs/plan/2026-07-27-todo-api.md
 맡는 단계: 단계 2, 단계 4
-건드릴 파일: src/store/todoStore.ts, src/store/todoStore.test.ts, src/store/CONTEXT.md
+건드릴 파일: src/todos/todos.service.ts, src/todos/todos.service.spec.ts, src/todos/CONTEXT.md
 이 범위 밖의 파일은 다른 트랙이 동시에 작업 중이다. 필요해지면 고치지 말고 보고해라.
 ```
 
-**`reviewer`의 비교 기준은 `develop`이 아니다.** `git diff feature/step-goal-presets...HEAD`로 준다 — `develop`과 비교하면 선행 단계의 변경까지 들어와 이번 트랙이 하지 않은 것을 지적한다.
+**`reviewer`의 비교 기준은 `develop`이 아니다.** `git diff feature/todo-api...HEAD`로 준다 — `develop`과 비교하면 선행 단계의 변경까지 들어와 이번 트랙이 하지 않은 것을 지적한다.
 
 트랙별 상태를 표로 관리한다. 지문은 트랙마다 따로 찍는다(워크트리가 다르므로 서로 영향받지 않는다 — 이것이 워크트리를 나눈 또 하나의 이득이다).
 
 | 트랙 | 브랜치 | 라운드 | 상태 | 검토 대상 지문 |
 |---|---|---|---|---|
-| store | `feature/...-store` | 2 | reviewer 대기 | `a1b2c3d4e5f6` |
+| todos | `feature/...-todos` | 2 | reviewer 대기 | `a1b2c3d4e5f6` |
 
 ### 4. 트랙이 끝나면 오케스트레이터가 커밋한다
 
 ```bash
-cd .claude/worktrees/step-goal-presets-store
+cd .claude/worktrees/todo-api-todos
 ../../scripts/fingerprint.sh          # 리뷰 판정 시점 지문과 대조
 npm run verify
-git add src/store/todoStore.ts src/store/todoStore.test.ts src/store/CONTEXT.md
+git add src/todos/todos.service.ts src/todos/todos.service.spec.ts src/todos/CONTEXT.md
 git commit
 ```
 
@@ -101,9 +103,9 @@ git commit
 하나 끝날 때마다 병합하면 나머지 트랙의 base가 흔들리고, 통합 verify가 어느 트랙 때문에 깨졌는지 가려내기 어려워진다.
 
 ```bash
-cd .claude/worktrees/step-goal-presets
-git merge --no-ff feature/step-goal-presets-store
-git merge --no-ff feature/step-goal-presets-ui
+cd .claude/worktrees/todo-api
+git merge --no-ff feature/todo-api-todos
+git merge --no-ff feature/todo-api-notifications
 ```
 
 **`--no-ff`를 쓴다.** 병합 커밋이 트랙 경계를 히스토리에 남긴다. 트랙 안의 커밋이 각각 의미를 갖지 못할 정도로 잘게 흩어졌다면 `--squash`로 합쳐도 된다.
@@ -131,7 +133,7 @@ PR 본문에 **트랙 구성**(이름, 맡은 단계, 리뷰 라운드 수)과 *
 트랙은 통합이 끝난 직후, 통합 워크트리는 PR이 머지된 뒤에 지운다.
 
 ```bash
-for t in store ui; do .claude/scripts/worktree-drop.sh step-goal-presets-$t; done
+for t in todos notifications; do .claude/scripts/worktree-drop.sh todo-api-$t; done
 ```
 
 ## 기록은 통합 워크트리 한 곳에 모은다
