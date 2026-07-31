@@ -1,10 +1,10 @@
 # CONTEXT
 
-> 마지막 업데이트: 2026-07-31
+> 마지막 업데이트: 2026-08-01
 
 ## 역할
 
-할 일(todo) 도메인이다. 두 테이블에 접근하는 Repository와, 두 테이블이 함께 쓰는 **날짜 계산**, 그리고 저장된 행을 **밖으로 내보낼 형태로 바꾸는 순수 함수**를 담당한다. Service·Controller·DTO는 아직 없다.
+할 일(todo) 도메인이다. 조회를 제공하는 Service, 두 테이블에 접근하는 Repository, 두 테이블이 함께 쓰는 **날짜 계산**, 저장된 행을 **밖으로 내보낼 형태로 바꾸는 순수 함수**를 담당한다. 쓰기 경로와 Controller·DTO는 아직 없다.
 
 ## 먼저 알아야 할 구조
 
@@ -29,9 +29,11 @@
 | `todo-templates.repository.ts` | 할 일 정의 접근. 만들기·읽기·고치기·삭제 + 목록 조회 두 가지 |
 | `todo-histories.repository.ts` | 완료 기록 접근 |
 | `todo-errors.ts` | Repository가 던지는 도메인 오류. 위 계층이 타입으로 구분한다 |
-| `todos.module.ts` | 위 둘을 등록하고 밖에서 쓸 수 있게 내보낸다 |
+| `todos.service.ts` | 조회 3종. **이 도메인의 유일한 진입점이다** |
+| `todos.service.spec.ts` | 무엇을 반환하고 어떤 입력을 거절하는가 |
+| `todos.module.ts` | 위를 등록하고 `TodosService`만 내보낸다. `UsersModule`을 물고 있다 |
 
-Repository의 검증은 `test/todos.e2e-spec.ts`가 실제 DB에 붙어서 한다. **단위 테스트를 따로 만들지 않는다** — DB 접근을 가짜로 바꾸면 "어떤 인자로 불렸는가"만 확인하게 되고, 그것은 동작이 아니라 구현 방식을 검사하는 것이다.
+**검증 방식이 계층마다 다르다.** Repository는 `test/todos.e2e-spec.ts`가 실제 DB에 붙어서 하고 단위 테스트를 만들지 않는다 — DB 접근을 가짜로 바꾸면 "어떤 인자로 불렸는가"만 확인하게 되고, 그것은 동작이 아니라 구현 방식을 검사하는 것이다. Service는 반대로 단위 테스트가 중심이다. 볼 것이 쿼리 결과가 아니라 **무엇을 반환하고 어떤 입력을 거절하는가**여서, 그것은 Repository를 대역으로 두고도 그대로 관찰된다.
 
 ## 목록을 어떻게 조회하는가
 
@@ -67,7 +69,7 @@ Repository의 검증은 `test/todos.e2e-spec.ts`가 실제 DB에 붙어서 한�
 
 **날짜별 기록 조회(`findDailyHistoriesOn`)는 매일 반복만 돌려준다.** 일회성의 날짜 값은 화면용이 아니라서 섞이면 안 되는데, 완료 기록에 반복 방식이 저장되지 않아 결과를 받은 쪽에서 걸러 낼 수 없다. 그래서 쿼리 조건으로 못 박았다.
 
-**그 메서드는 곧 부르는 곳이 없어진다.** 매일 반복 목록이 `findDailyActiveOn`으로 정의와 기록을 함께 받기 때문이다. **지우지 않고 미사용으로 남긴다**(사용자가 같은 판단을 내린 선례가 있다) — 지금은 `test/todos.e2e-spec.ts`가 부르고 있고, "그 날짜에 무엇을 했는가"를 정의와 무관하게 묻는 화면이 생기면 다시 쓰인다.
+**그 메서드를 부르는 프로덕션 코드가 없다.** 매일 반복 목록이 `findDailyActiveOn`으로 정의와 기록을 함께 받기 때문이다. **지우지 않고 미사용으로 남긴다**(사용자가 같은 판단을 내린 선례가 있다) — 지금은 `test/todos.e2e-spec.ts`가 부르고 있고, "그 날짜에 무엇을 했는가"를 정의와 무관하게 묻는 화면이 생기면 다시 쓰인다.
 
 ### 상세 화면의 이력은 기간 범위로 조회한다
 
@@ -273,12 +275,14 @@ Repository의 검증은 `test/todos.e2e-spec.ts`가 실제 DB에 붙어서 한�
 
 ## 아직 없는 것
 
-- **Service·Controller·DTO.** `TodosModule`이 Repository를 밖으로 내보내는 것은 그때까지의 임시 상태다. Service가 들어오면 Repository는 내보내지 말아야 한다 — 그렇지 않으면 다른 도메인이 Repository를 직접 불러 규칙을 건너뛴다
+- **쓰기 경로.** 만들기·고치기·삭제와 진행값 저장·완료·완료 취소가 없다. 조회만 있는 상태다
+- **Controller와 요청 DTO.** 그래서 `remindAt`의 `HH:mm` 형식 검증과 타임존 이름 유효성 검증도 아직 없다 — 값을 받는 경계의 책임이다. **두 목록을 하나로 합쳐 내보낼지도 그때 정한다**(Service가 나눠 두었으므로 합치는 쪽을 나중에 고를 수 있다)
 - **알림 대상을 찾는 조회와 그 인덱스.** 실제 조회 조건이 정해질 때(삭제 여부·활성 기간을 함께 볼 것이다) 그에 맞춰 인덱스를 만든다. 미리 만들면 아무도 읽지 않는 인덱스에 쓰기 비용만 든다
 - **일회성 예정일이 지났을 때의 처리.** 예정일을 바꿔도 기록의 날짜는 움직이지 않으므로 옮길 것은 없다. 다만 "예정일이 지난 일회성"을 화면에서 어떻게 다룰지는 Service가 정한다
 
 ## 의존성
 
-- `@nestjs/common` — `Injectable`, `Module`
+- `@nestjs/common` — `Injectable`, `Module`, `Logger`, `BadRequestException`, `NotFoundException`
+- `src/users/users.repository.ts` — `TodosService`가 생성자로 주입받아 유저 타임존을 읽는다. `TodosModule`이 `UsersModule`을 import한다 — **이 폴더가 손을 뻗는 유일한 다른 도메인이다**
 - `src/prisma/prisma.service.ts` — Repository가 생성자로 주입받는다
 - `src/generated/prisma` — 모델과 enum 타입. `todo-local-date.ts`와 `todo-view.ts`는 **타입으로만** 가져와 실행 시점 의존이 없다. `todo-view.ts`가 `Prisma.Decimal`을 값으로 import하지 않고 `toNumber()`만 부르는 것도 그래서다

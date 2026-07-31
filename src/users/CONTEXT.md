@@ -1,6 +1,6 @@
 # CONTEXT
 
-> 마지막 업데이트: 2026-07-31
+> 마지막 업데이트: 2026-08-01
 
 ## 역할
 
@@ -49,7 +49,6 @@ Repository의 검증은 `test/users.e2e-spec.ts`가 실제 DB에 붙어서 한�
 ## 아직 없는 것
 
 - **Service·Controller·DTO.** 인증 수단이 정해질 때 가입·탈퇴와 함께 만든다
-- **이 모듈을 import하는 곳.** 타임존을 읽는 쪽(`TodosService`)이 생기는 라운드에서 `TodosModule`이 물게 된다. 그래서 `test/users.e2e-spec.ts`는 `AppModule`과 `UsersModule`을 함께 `imports`에 넣는다 — `PrismaModule`은 같은 클래스를 두 모듈이 import하므로 인스턴스가 하나로 공유된다
 
 ## 의존성
 

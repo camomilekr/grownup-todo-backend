@@ -211,8 +211,8 @@ export class TodoHistoriesRepository {
    * 항목 변환 함수를 내보내지 않고, 그 유일한 통로인 `toDailyTodoDetail`이 매일 반복으로
    * 좁혀진 정의만 받는다.
    *
-   * **넣을지 여부는 이 메서드를 실제로 부르는 코드가 생길 때 정한다.** 호출 형태를 보고
-   * 판단할 문제이고, 지금 넣으면 위의 조용한 오류를 미리 만드는 쪽이다.
+   * **부르는 코드가 생겨서 확인했고 넣지 않는 것으로 정했다** — `TodosService.getTodo`가
+   * 정의를 매일 반복으로 좁힌 뒤에만 부르므로 위 근거가 타입으로 보장된다.
    *
    * @param from 범위 시작일(포함). `parseLocalDateKey`로 만든다
    * @param until 범위 종료일(포함)

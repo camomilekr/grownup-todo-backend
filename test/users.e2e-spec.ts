@@ -3,17 +3,12 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { AppModule } from './../src/app.module';
 import { PrismaService } from './../src/prisma/prisma.service';
 import { UsersRepository } from './../src/users/users.repository';
-import { UsersModule } from './../src/users/users.module';
 
 /**
  * 실제 Supabase Postgres에 붙는다(`.claude/rules/nestjs.md` — "DB를 실제로 붙이는
  * 테스트는 e2e로 분류한다"). Repository는 단위 테스트를 만들지 않는다 —
  * `PrismaService`를 대역으로 바꾸면 쿼리가 무엇을 돌려주는지가 아니라 호출 인자만
  * 검증하게 되고, 그건 구현 세부사항 테스트다.
- *
- * `UsersModule`을 `imports`에 함께 넣는다. **아직 `AppModule`이 그것을 물지 않기
- * 때문이다** — 타임존을 읽는 쪽(`TodosService`)이 생기는 라운드에서 배선이 붙는다.
- * `PrismaModule`은 두 모듈이 같은 클래스를 import하므로 인스턴스가 하나로 공유된다.
  *
  * **공유 DB를 쓰므로 데이터를 남기지 않는다.** 랜덤 email로 전용 유저를 만들고
  * `afterAll`에서 지운다.
@@ -39,7 +34,7 @@ describe('Users Repository (e2e)', () => {
 
   beforeAll(async () => {
     const moduleFixture: TestingModule = await Test.createTestingModule({
-      imports: [AppModule, UsersModule],
+      imports: [AppModule],
     }).compile();
 
     app = moduleFixture.createNestApplication();

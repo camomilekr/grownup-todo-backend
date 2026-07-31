@@ -12,9 +12,6 @@ import { UsersRepository } from './users.repository';
  * 그 값을 쓰는 `TodosService`가 정한다. 판단할 것이 없는 자리에 Service를 한 겹 두면
  * Repository를 그대로 대신 부르는 껍데기가 된다. 가입·탈퇴처럼 판단이 붙는 경로가
  * 생기면 그때 Service를 만들고 Repository를 `exports`에서 뺀다.
- *
- * **아직 아무도 이 모듈을 import하지 않는다.** 타임존을 읽는 쪽(`TodosService`)이
- * 생기는 라운드에서 `TodosModule`이 물게 된다.
  */
 @Module({
   imports: [PrismaModule],
