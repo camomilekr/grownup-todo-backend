@@ -22,7 +22,7 @@ Prisma 클라이언트를 NestJS DI 컨테이너와 라이프사이클에 붙인
 |---|---|---|
 | `AppUser` | `app_user` | todo 소유자. `timeZone`이 날짜 키 계산의 기준이다 (`user`는 Postgres 예약어라 테이블명을 피했다) |
 | `TodoTemplate` | `todo_template` | todo의 "정의". 생성하면 이 행 하나가 생긴다 |
-| `TodoHistory` | `todo_history` | 날짜별 수행 내역. 완료·진행값을 기록할 때 **비로소** 생긴다(lazy) |
+| `TodoHistory` | `todo_history` | 날짜별 **완료 기록**. 할 일의 내용은 담지 않고 실적만 담는다. 완료하거나 진행값을 입력할 때 **비로소** 행이 생긴다 |
 
 enum은 `CompleteType`(일회성 `ONCE`·매일 반복 `DAILY`)과 `TodoType`(일반 `GENERAL`·숫자형 `NUMERIC`·걸음수 `STEPS`)이다. **`STEPS` 전용 수치 컬럼은 없다** — 타입별로 컬럼을 나누지 않고 `targetValue`/`targetUnit`(+ history의 `progressValue`) 한 쌍으로 통합한다. PK는 전부 `BigInt @default(autoincrement())` → `BIGSERIAL`이고, FK는 `onDelete: Cascade`다. **`AppUser` 한 행을 지우면 그 유저의 template·history가 전부 사라진다** — 테스트에서 정리할 때 이 성질을 쓴다.
 
@@ -31,7 +31,7 @@ enum은 `CompleteType`(일회성 `ONCE`·매일 반복 `DAILY`)과 `TodoType`(�
 - `where: { deletedAt: null }` → 생성되는 복합 유니크 입력 타입에 그 조건이 들어가지 않아 `upsert`/`findUnique`가 soft delete된 행을 집는다
 - ONCE 전용 `@@unique([todoId], where: { completeType: ONCE })` → Prisma가 `todoId`를 **단독 유니크로 믿는다.** DAILY는 같은 `todoId`로 여러 행이 있는데 `findUnique({ where: { todoId } })`가 타입상 성립해 버린다
 
-soft delete 복구는 `deletedAt`을 `null`로 되돌리는 update로 처리한다.
+지운 기록도 이 제약의 대상이라 그 자리를 계속 차지한다. **한 번 지운 기록은 되살리지 않는다** — 완료 취소는 삭제가 아니라 `completed_at`을 비우는 수정이다.
 
 ### Prisma가 표현하지 못해 SQL에 손으로 넣은 것 — 둘 다 `migrate diff`가 보지 못한다
 
@@ -40,7 +40,7 @@ soft delete 복구는 `deletedAt`을 `null`로 되돌리는 update로 처리한�
 | | 왜 손으로 넣는가 | 빠지면 |
 |---|---|---|
 | `ENABLE ROW LEVEL SECURITY` × 4 — 세 테이블 + `_prisma_migrations`(이쪽만 `IF EXISTS`) | Prisma 스키마에 RLS 문법이 없다 | anon 키만으로 전 데이터가 열린다 (아래) |
-| `COMMENT ON TABLE`/`COLUMN` × 42 | **Prisma의 `///` 주석은 DB로 가지 않는다** — 생성된 TS 클라이언트의 JSDoc으로만 들어간다 | psql·DataGrip·Supabase 대시보드에서 컬럼 이름만 보인다 |
+| `COMMENT ON TABLE` 3 + `COMMENT ON COLUMN` 32 | **Prisma의 `///` 주석은 DB로 가지 않는다** — 생성된 TS 클라이언트의 JSDoc으로만 들어간다 | psql·DataGrip·Supabase 대시보드에서 컬럼 이름만 보인다 |
 
 **`migrate diff`는 둘 중 어느 것도 비교하지 않는다.** 빠져도 `migrate status`·`migrate diff`·`verify`·나머지 테스트가 전부 초록으로 통과한다(drift 검사가 `No difference detected.`로 통과하는 것을 확인했다). **유일한 관문은 `test/schema-guard.e2e-spec.ts`다** — `public`을 훑어 RLS가 꺼진 테이블이나 코멘트 없는 테이블·컬럼이 하나라도 있으면 실패한다. **목록을 하드코딩하지 않았으므로 앞으로 추가하는 테이블·컬럼에도 자동으로 적용된다.**
 
@@ -83,7 +83,7 @@ DTO 계층이 생기는 라운드가 **이 넷을 한 묶음으로** 처리해�
 |---|---|---|
 | `app_user.email` | `trim()` + `toLowerCase()` | 같은 사람이 두 계정을 갖는다 |
 | `app_user.time_zone` | IANA 이름인지 (`Intl.supportedValuesOf('timeZone')`) | `toLocalDateKey`가 `RangeError`를 던져 **그 유저의 모든 날짜 계산이 영구히 실패한다** |
-| `todo_*.remind_at` | `/^([01]\d\|2[0-3]):[0-5]\d$/` | 스캔이 문자열 동등 비교라 **에러 없이 영원히 알림이 오지 않는다** |
+| `todo_template.remind_at` | `/^([01]\d\|2[0-3]):[0-5]\d$/` | 스캔이 문자열 동등 비교라 **에러 없이 영원히 알림이 오지 않는다** |
 | `todo_template.active_from`/`active_until` | 날짜 문자열 → `parseLocalDateKey` | 손으로 만든 `Date`는 하루 밀려 저장된다 |
 
 **`@db.Date` 컬럼(`historied_on`, `active_from`, `active_until`)에 넘기는 `Date`는 UTC 컴포넌트로 직렬화된다.** `@prisma/adapter-pg`의 `formatDate`가 `getUTCFullYear`/`getUTCMonth`/`getUTCDate`를 쓴다. 로컬 타임존 자정 `Date`를 넘기면 하루가 밀리므로 **손으로 만들지 말고** `src/todos/todo-local-date.ts`의 세 함수(`toHistoriedOn`·`toLocalDateKey`·`parseLocalDateKey`)가 만든 값을 쓴다. 히스토리 키는 **반드시 `toHistoriedOn`**을 거친다 — `completeType`에 따라 규칙이 갈리고 그 선택을 호출자에게 맡기면 틀려도 아무것도 실패하지 않는다.

@@ -128,19 +128,33 @@ describe('스키마 가드 (e2e)', () => {
     expect(rows.map((row) => `${row.table}.${row.column}`)).toEqual([]);
   });
 
-  it('코멘트 검사가 실제로 컬럼을 훑고 있다', async () => {
-    // 위 두 단정은 빈 배열끼리 비교하므로, 쿼리가 아무 행도 보지 못하는 상태에서도
-    // 조용히 통과한다. 실제로 컬럼을 세고 있는지 여기서 고정한다.
+  it('코멘트 검사가 대상 테이블을 하나도 빠뜨리지 않고 훑는다', async () => {
+    // 위 두 단정은 빈 배열끼리 비교하므로 **쿼리가 아무 행도 보지 못하는 상태에서도
+    // 조용히 통과한다.** 그것을 막는 sentinel이다.
+    //
+    // 컬럼 **개수**를 세지 않는다. 그 숫자는 감시 목적과 무관한데 스키마를 줄일
+    // 때마다 하한에 걸려 테스트를 고치게 만든다(실제로 컬럼이 39→32로 줄었다).
+    // 대신 컬럼 스캔이 **훑은 테이블 수**가 검사 대상 테이블 수와 같은지 본다 —
+    // 두 값 모두 쿼리로 얻으므로 하드코딩이 없고, 조인이 끊기면 scanned가 0이 되어
+    // 즉시 실패한다.
     const rows = await prisma.$queryRaw<
-      { count: bigint }[]
-    >`select count(*) as count
-        from pg_class c
-        join pg_namespace n on n.oid = c.relnamespace and n.nspname = 'public'
-        join pg_attribute a on a.attrelid = c.oid and a.attnum > 0 and not a.attisdropped
-       where c.relkind = 'r' and c.relname <> '_prisma_migrations'`;
+      { scanned: bigint; total: bigint }[]
+    >`select
+        (select count(distinct c.relname)
+           from pg_class c
+           join pg_namespace n on n.oid = c.relnamespace and n.nspname = 'public'
+           join pg_attribute a on a.attrelid = c.oid and a.attnum > 0 and not a.attisdropped
+          where c.relkind = 'r' and c.relname <> '_prisma_migrations') as scanned,
+        (select count(*)
+           from pg_class c
+           join pg_namespace n on n.oid = c.relnamespace and n.nspname = 'public'
+          where c.relkind = 'r' and c.relname <> '_prisma_migrations') as total`;
 
-    // 세 테이블에 최소 서른 개 넘는 컬럼이 있다. 정확한 수를 박으면 컬럼을 추가할
-    // 때마다 이 테스트를 고쳐야 하므로 하한만 둔다.
-    expect(Number(rows[0].count)).toBeGreaterThan(30);
+    const scanned = Number(rows[0].scanned);
+    const total = Number(rows[0].total);
+
+    // `0 === 0`으로 통과하지 않게 검사 대상이 실재하는 것을 먼저 못 박는다.
+    expect(total).toBeGreaterThan(0);
+    expect(scanned).toBe(total);
   });
 });

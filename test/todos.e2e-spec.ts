@@ -3,6 +3,10 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { AppModule } from './../src/app.module';
 import { PrismaService } from './../src/prisma/prisma.service';
 import { TodoHistoriesRepository } from './../src/todos/todo-histories.repository';
+import {
+  TodoTemplateDeletedError,
+  TodoTemplateNotFoundError,
+} from './../src/todos/todo-errors';
 import { TodoTemplatesRepository } from './../src/todos/todo-templates.repository';
 import {
   parseLocalDateKey,
@@ -126,17 +130,53 @@ describe('Todos Repository (e2e)', () => {
       expect(await templates.findById(created.todoId)).toBeNull();
     });
 
-    it('todoType·completeType은 타입 수준에서 수정이 막혀 있다', () => {
-      // 사용자 확정 요구다. **런타임 검사가 아니라 컴파일 검사로 고정한다** —
-      // 아래 함수는 호출하지 않고, `@ts-expect-error`가 붙은 줄에 타입 오류가 없으면
-      // tsc가 "Unused '@ts-expect-error' directive"로 거부한다. 즉
-      // `UpdateTodoTemplateInput`의 `Omit`에서 두 필드를 빼는 순간 `npm run verify`가
-      // 깨진다. 실행하면 실제 DB를 건드리므로 참조만 하고 부르지 않는다.
+    it('금지된 필드를 넣으면 컴파일 단계에서 막힌다', () => {
+      // 이 테스트는 실행 결과가 아니라 **컴파일 성공 여부**를 검사한다. 방식이
+      // 낯설 수 있어 원리를 적어 둔다.
+      //
+      // `@ts-expect-error`는 "바로 다음 줄에 타입 오류가 있을 것"이라고 선언하는
+      // 주석이다. 오류가 **없으면** TypeScript가 거꾸로 "쓸데없는 지시자다"라며
+      // `Unused '@ts-expect-error' directive` 오류를 낸다. 즉 아래 네 줄은 각각
+      // "이 코드는 타입 오류여야 한다"는 뜻이고, 누군가 금지를 풀면 그 순간
+      // `npm run verify`가 깨진다.
+      //
+      // 함수를 선언만 하고 부르지 않는 이유는 실행하면 실제 DB를 건드리기
+      // 때문이다. 컴파일만 되면 목적이 달성된다.
       const typeGuard = async () => {
-        // @ts-expect-error todoType은 생성 후 수정할 수 없다 (히스토리가 복제한다)
+        // 아래 둘: 할 일의 종류(todoType)와 반복 방식(completeType)은 만든 뒤
+        // 바꿀 수 없다. 이유는 각 Repository 타입 정의의 주석에 있다.
+
+        // @ts-expect-error todoType은 생성 후 수정할 수 없다
         await templates.update(1n, { todoType: 'NUMERIC' });
-        // @ts-expect-error completeType은 생성 후 수정할 수 없다 (historiedOn 규칙이 바뀐다)
+        // @ts-expect-error completeType은 생성 후 수정할 수 없다
         await templates.update(1n, { completeType: 'ONCE' });
+
+        // 아래 둘은 이번 변경으로 새로 금지된 것이다.
+
+        // 일시 중지 기능 자체를 없앴으므로 그런 컬럼이 존재하지 않는다.
+        await templates.create({
+          userId,
+          title: '중지 없는 todo',
+          todoType: 'GENERAL',
+          completeType: 'DAILY',
+          // @ts-expect-error suspendedAt은 스키마에서 제거됐다
+          suspendedAt: new Date(),
+        });
+
+        // 할 일의 내용(제목·설명 등)은 todoTemplate에만 두고 완료 기록에는
+        // 복사하지 않는다. 그래서 스냅샷이 title을 받지 않는다.
+        await histories.upsertForHistoriedOn(
+          {
+            todoId: 1n,
+            userId,
+            historiedOn: parseLocalDateKey('2026-08-01'),
+            targetValue: null,
+            targetUnit: null,
+            // @ts-expect-error title은 todoHistory로 복사하지 않는다
+            title: '복사되면 안 된다',
+          },
+          {},
+        );
       };
 
       expect(typeGuard).toBeInstanceOf(Function);
@@ -202,17 +242,34 @@ describe('Todos Repository (e2e)', () => {
       expect(rows.map((row) => row.todoId)).toContain(past.todoId);
     });
 
-    it('suspendedAt이 있어도 ONCE는 목록에 남는다', async () => {
-      // 일시 중지는 DAILY의 반복을 멈추는 개념이고 ONCE에는 무의미하다. ONCE에
-      // 중지 개념을 두는 것은 확정된 요구사항에 없으므로 **현재 동작을 고정한다** —
-      // 스키마 주석만 읽고 "ONCE도 중지되면 빠진다"고 믿는 구현을 막는다.
+    it('진행값만 입력하고 완료하지 않았으면 목록에 남는다', async () => {
+      // 완료 기록 행이 있다고 해서 완료한 것이 아니다. 진행값만 입력한 행도
+      // 정상적으로 존재한다(30/100을 채워 둔 상태). 조건을 "기록이 없는 것"으로
+      // 잘못 줄이면 이런 할 일이 목록에서 조용히 사라진다.
       const template = await templates.create({
         userId,
-        title: '중지된 ONCE',
-        todoType: 'GENERAL',
+        title: '진행 중인 ONCE',
+        todoType: 'NUMERIC',
         completeType: 'ONCE',
-        suspendedAt: new Date('2026-07-15T00:00:00.000Z'),
+        targetValue: '100',
+        targetUnit: '회',
       });
+      await histories.upsertForHistoriedOn(
+        {
+          todoId: template.todoId,
+          userId: template.userId,
+          historiedOn: toHistoriedOn({
+            completeType: template.completeType,
+            createdAt: template.createdAt,
+            performedAt: new Date('2026-08-01T02:00:00.000Z'),
+            timeZone,
+          }),
+          targetValue: template.targetValue,
+          targetUnit: template.targetUnit,
+        },
+        // 완료 시각을 넣지 않는다. 진행값만 있다.
+        { progressValue: '30' },
+      );
 
       const rows = await templates.findOnceWithoutCompletedHistory(userId);
 
@@ -237,12 +294,6 @@ describe('Todos Repository (e2e)', () => {
             performedAt: new Date('2026-08-01T02:00:00.000Z'),
             timeZone,
           }),
-          title: template.title,
-          description: template.description,
-          todoType: template.todoType,
-          completeType: template.completeType,
-          remindAt: template.remindAt,
-          shouldDoAt: template.shouldDoAt,
           targetValue: template.targetValue,
           targetUnit: template.targetUnit,
         },
@@ -254,7 +305,7 @@ describe('Todos Repository (e2e)', () => {
       expect(rows.map((row) => row.todoId)).not.toContain(template.todoId);
     });
 
-    it('완료를 취소하면(soft delete) 다시 목록에 나온다', async () => {
+    it('완료를 취소하면 다시 목록에 나온다', async () => {
       const template = await templates.create({
         userId,
         title: '완료 취소할 ONCE',
@@ -268,27 +319,41 @@ describe('Todos Repository (e2e)', () => {
         timeZone,
       });
 
-      const history = await histories.upsertForHistoriedOn(
-        {
-          todoId: template.todoId,
-          userId: template.userId,
-          historiedOn,
-          title: template.title,
-          description: null,
-          todoType: template.todoType,
-          completeType: template.completeType,
-          remindAt: null,
-          shouldDoAt: null,
-          targetValue: null,
-          targetUnit: null,
-        },
-        { completedAt: new Date('2026-08-01T02:00:00.000Z') },
-      );
-      await histories.softDelete(history.todoHistoryId);
+      const snapshot = {
+        todoId: template.todoId,
+        userId: template.userId,
+        historiedOn,
+        targetValue: null,
+        targetUnit: null,
+      };
+      await histories.upsertForHistoriedOn(snapshot, {
+        completedAt: new Date('2026-08-01T02:00:00.000Z'),
+      });
+
+      // 완료 취소는 삭제가 아니라 **완료 시각을 비우는 수정**이다. 행은 그대로
+      // 남고 `deletedAt`은 건드리지 않는다.
+      const canceled = await histories.upsertForHistoriedOn(snapshot, {
+        completedAt: null,
+      });
+
+      expect(canceled.completedAt).toBeNull();
+      expect(canceled.deletedAt).toBeNull();
 
       const rows = await templates.findOnceWithoutCompletedHistory(userId);
-
       expect(rows.map((row) => row.todoId)).toContain(template.todoId);
+
+      // **다시 완료할 수 있어야 한다.** 일회성의 날짜 키는 할 일 생성 시각에서
+      // 나오므로 슬롯이 평생 하나뿐인데, 그 하나가 막히면 회복할 방법이 없다.
+      // 기록을 지울 수 없게 만든 덕분에 그 막힘이 생기지 않는다.
+      const recompleted = await histories.upsertForHistoriedOn(snapshot, {
+        completedAt: new Date('2026-09-15T02:00:00.000Z'),
+      });
+      expect(recompleted.completedAt).not.toBeNull();
+      expect(
+        (await templates.findOnceWithoutCompletedHistory(userId)).map(
+          (row) => row.todoId,
+        ),
+      ).not.toContain(template.todoId);
     });
   });
 
@@ -399,21 +464,6 @@ describe('Todos Repository (e2e)', () => {
       expect(rows.map((item) => item.todoId)).toContain(template.todoId);
     });
 
-    it('중단된 DAILY는 기간이 남아 있어도 빠진다', async () => {
-      const template = await templates.create({
-        userId,
-        title: '중단된 DAILY',
-        todoType: 'GENERAL',
-        completeType: 'DAILY',
-        activeFrom: parseLocalDateKey('2026-07-01'),
-        suspendedAt: new Date('2026-07-15T00:00:00.000Z'),
-      });
-
-      const rows = await templates.findDailyActiveOn(userId, today);
-
-      expect(rows.map((item) => item.todoId)).not.toContain(template.todoId);
-    });
-
     it('어제 완료해도 오늘은 히스토리 없이 다시 나온다', async () => {
       // 확정된 요구사항의 핵심이다 — 어제 것이 오늘로 밀려오지 않고, 어제는
       // 어제 상태로 남는다.
@@ -428,12 +478,6 @@ describe('Todos Repository (e2e)', () => {
         todoId: template.todoId,
         userId: template.userId,
         historiedOn: yesterday,
-        title: template.title,
-        description: null,
-        todoType: template.todoType,
-        completeType: template.completeType,
-        remindAt: null,
-        shouldDoAt: null,
         targetValue: null,
         targetUnit: null,
       };
@@ -472,24 +516,83 @@ describe('Todos Repository (e2e)', () => {
       });
     }
 
+    // 완료 기록에 넣는 값은 이제 다섯 개뿐이다. 할 일의 내용(제목·설명·종류)은
+    // todoTemplate에만 두고 기록에는 복사하지 않는다.
     function snapshotOf(
-      template: { todoId: bigint; userId: bigint; title: string },
+      template: { todoId: bigint; userId: bigint },
       historiedOn: Date,
     ) {
       return {
         todoId: template.todoId,
         userId: template.userId,
         historiedOn,
-        title: template.title,
-        description: null,
-        todoType: 'NUMERIC' as const,
-        completeType: 'DAILY' as const,
-        remindAt: null,
-        shouldDoAt: null,
         targetValue: '100',
         targetUnit: '회',
       };
     }
+
+    it('목표치는 기록에 함께 남아 그날 기준이 보존된다', async () => {
+      // 할 일의 내용은 기록에 복사하지 않지만 **목표치 한 쌍만은 복사한다.**
+      // 나중에 목표를 5에서 8로 올려도 5를 채웠던 날의 달성률이 62%로 다시
+      // 계산되지 않게 하려는 것이다. 그 두 컬럼이 실수로 함께 지워지는 것을 막는다.
+      const template = await createDailyTemplate('목표치 보존');
+      const historiedOn = parseLocalDateKey('2026-08-25');
+
+      await histories.upsertForHistoriedOn(snapshotOf(template, historiedOn), {
+        progressValue: '40',
+      });
+      const found = await histories.findByTodoIdAndHistoriedOn(
+        template.todoId,
+        historiedOn,
+      );
+
+      expect(found?.targetValue?.toString()).toBe('100');
+      expect(found?.targetUnit).toBe('회');
+      expect(found?.progressValue?.toString()).toBe('40');
+    });
+
+    it('ONCE 히스토리는 날짜별 조회에서 빠진다', async () => {
+      // `complete_type`이 history에서 사라지면 호출자가 결과를 사후 필터할 수단이
+      // 없다. ONCE의 `historiedOn`은 유저가 보는 날짜가 아니라 중복 방지 키라서
+      // 날짜별 목록에 섞이면 안 된다 — Repository가 걸러야 한다.
+      const onceTemplate = await templates.create({
+        userId,
+        title: '날짜 조회에서 빠질 ONCE',
+        todoType: 'GENERAL',
+        completeType: 'ONCE',
+      });
+      const onceHistoriedOn = toHistoriedOn({
+        completeType: 'ONCE',
+        createdAt: onceTemplate.createdAt,
+        performedAt: new Date('2026-08-18T02:00:00.000Z'),
+        timeZone,
+      });
+      await histories.upsertForHistoriedOn(
+        {
+          todoId: onceTemplate.todoId,
+          userId: onceTemplate.userId,
+          historiedOn: onceHistoriedOn,
+          targetValue: null,
+          targetUnit: null,
+        },
+        { completedAt: new Date('2026-08-18T02:00:00.000Z') },
+      );
+
+      // 같은 날짜에 DAILY 한 건을 둔다. "전부 빠지는" 구현을 막는다.
+      const dailyTemplate = await createDailyTemplate('같은 날 DAILY');
+      await histories.upsertForHistoriedOn(
+        snapshotOf(dailyTemplate, onceHistoriedOn),
+        {},
+      );
+
+      const rows = await histories.findDailyHistoriesOn(
+        userId,
+        onceHistoriedOn,
+      );
+
+      expect(rows.map((row) => row.todoId)).not.toContain(onceTemplate.todoId);
+      expect(rows.map((row) => row.todoId)).toContain(dailyTemplate.todoId);
+    });
 
     it('같은 (todoId, historiedOn)으로 두 번 upsert하면 행이 하나다', async () => {
       const template = await createDailyTemplate('두 번 upsert');
@@ -525,20 +628,115 @@ describe('Todos Repository (e2e)', () => {
       );
     });
 
-    it('soft delete한 뒤 다시 upsert하면 deletedAt이 되돌아온다', async () => {
-      const template = await createDailyTemplate('복구되는 히스토리');
+    it('기록을 지우는 메서드 자체가 없다', () => {
+      // 사용자가 확정한 규칙이다 — 완료 기록은 만든 뒤 지울 수 없다. 문서로
+      // 경고하는 대신 **메서드를 없앴다.** 없는 메서드는 부를 수 없다.
+      // (할 일 자체를 지울 때 함께 지워지는 경로만 남는다.)
+      const typeGuard = async () => {
+        // @ts-expect-error 완료 기록은 개별적으로 지울 수 없다
+        await histories.softDelete(1n);
+      };
+
+      expect(typeGuard).toBeInstanceOf(Function);
+    });
+
+    it('지워진 할 일에는 새 기록을 만들 수 없다', async () => {
+      // 할 일이 지워지면 그 기록도 함께 지워지고, 지워진 기록은 되살아나지 않는다.
+      // 그런데 같은 할 일에 같은 날짜 기록은 하나뿐이라는 제약이 남아 있어서
+      // 지워진 행이 그 자리를 계속 차지한다. **조용히 지워진 행을 고치는 대신
+      // 명시적으로 거절한다** — 그러지 않으면 "기록했는데 화면에 안 나온다"가
+      // 되고 오류도 나지 않는다.
+      const template = await createDailyTemplate('지워진 할 일에 재기록');
       const historiedOn = parseLocalDateKey('2026-08-12');
       const snapshot = snapshotOf(template, historiedOn);
 
       const created = await histories.upsertForHistoriedOn(snapshot, {});
-      await histories.softDelete(created.todoHistoryId);
-      const revived = await histories.upsertForHistoriedOn(snapshot, {
-        progressValue: '5',
+      await templates.softDelete(template.todoId);
+
+      await expect(
+        histories.upsertForHistoriedOn(snapshot, { progressValue: '5' }),
+      ).rejects.toThrow(TodoTemplateDeletedError);
+
+      // 지워진 행은 지워진 채로 남는다.
+      const row = await prisma.todoHistory.findUnique({
+        where: { todoHistoryId: created.todoHistoryId },
+      });
+      expect(row?.deletedAt).not.toBeNull();
+    });
+
+    it('존재하지 않는 할 일이면 다른 오류로 구분해 거절한다', async () => {
+      // "지워졌다"와 "애초에 없다"를 같은 오류로 뭉치면, 오타로 잘못된 번호를 보낸
+      // 요청이 로그에 "지워진 할 일"로 남는다. 원인을 찾는 사람이 지워진 행을
+      // 뒤지는데 그런 행이 없어서 헤맨다.
+      await expect(
+        histories.upsertForHistoriedOn(
+          {
+            todoId: 999999999n,
+            userId,
+            historiedOn: parseLocalDateKey('2026-08-28'),
+            targetValue: null,
+            targetUnit: null,
+          },
+          {},
+        ),
+      ).rejects.toThrow(TodoTemplateNotFoundError);
+    });
+
+    it('기록이 없던 날짜여도 지워진 할 일이면 거절한다', async () => {
+      // 검사 대상이 "그 날짜의 지워진 기록"이 아니라 **할 일 자체의 삭제 여부**다.
+      // 기록이 아예 없던 날짜에도 지워진 할 일이면 새로 만들 수 없다.
+      const template = await createDailyTemplate('기록 없이 지워진 할 일');
+      await templates.softDelete(template.todoId);
+
+      await expect(
+        histories.upsertForHistoriedOn(
+          snapshotOf(template, parseLocalDateKey('2026-08-27')),
+          { progressValue: '1' },
+        ),
+      ).rejects.toThrow(TodoTemplateDeletedError);
+    });
+
+    it('할 일을 지우면 그 기록도 함께 지워진다', async () => {
+      // 사용자가 확정한 두 번째 삭제 경로다. 한쪽만 반영되면 "할 일은 지워졌는데
+      // 기록은 살아 있는" 상태가 되므로 두 테이블을 한 트랜잭션에서 바꾼다.
+      const template = await createDailyTemplate('통째로 지울 할 일');
+      const first = await histories.upsertForHistoriedOn(
+        snapshotOf(template, parseLocalDateKey('2026-08-21')),
+        { progressValue: '10' },
+      );
+      const second = await histories.upsertForHistoriedOn(
+        snapshotOf(template, parseLocalDateKey('2026-08-22')),
+        { progressValue: '20' },
+      );
+
+      await templates.softDelete(template.todoId);
+
+      const rows = await prisma.todoHistory.findMany({
+        where: {
+          todoHistoryId: { in: [first.todoHistoryId, second.todoHistoryId] },
+        },
       });
 
-      // 새 행이 생기지 않고 같은 행이 되살아난다.
-      expect(revived.todoHistoryId).toBe(created.todoHistoryId);
-      expect(revived.deletedAt).toBeNull();
+      expect(rows).toHaveLength(2);
+      expect(rows.every((row) => row.deletedAt !== null)).toBe(true);
+    });
+
+    it('지워진 할 일의 기록은 날짜별 조회에서 빠진다', async () => {
+      // 연쇄 삭제는 **지우는 시점에 있던 기록만** 덮는다. 그래서 조회 쪽에도
+      // 할 일의 삭제 여부를 조건으로 걸어 두 겹으로 막는다 — 저장 거절과
+      // 조회 조건 중 하나만 있으면 좁은 시간차로 빠져나가는 경로가 남는다.
+      const historiedOn = parseLocalDateKey('2026-08-24');
+      const alive = await createDailyTemplate('살아 있는 할 일');
+      const doomed = await createDailyTemplate('곧 지울 할 일');
+
+      await histories.upsertForHistoriedOn(snapshotOf(alive, historiedOn), {});
+      await histories.upsertForHistoriedOn(snapshotOf(doomed, historiedOn), {});
+      await templates.softDelete(doomed.todoId);
+
+      const rows = await histories.findDailyHistoriesOn(userId, historiedOn);
+
+      expect(rows.map((row) => row.todoId)).toContain(alive.todoId);
+      expect(rows.map((row) => row.todoId)).not.toContain(doomed.todoId);
     });
 
     it('historiedOn이 UTC 자정 Date로 왕복한다', async () => {
@@ -569,7 +767,7 @@ describe('Todos Repository (e2e)', () => {
         {},
       );
 
-      const rows = await histories.findManyByUserIdAndHistoriedOn(
+      const rows = await histories.findDailyHistoriesOn(
         userId,
         parseLocalDateKey('2026-08-14'),
       );
@@ -579,15 +777,15 @@ describe('Todos Repository (e2e)', () => {
       );
     });
 
-    it('soft delete된 행은 조회에서 빠진다', async () => {
+    it('할 일이 지워지면 그 기록도 단건 조회에서 빠진다', async () => {
       const template = await createDailyTemplate('조회에서 빠짐');
       const historiedOn = parseLocalDateKey('2026-08-16');
 
-      const created = await histories.upsertForHistoriedOn(
+      await histories.upsertForHistoriedOn(
         snapshotOf(template, historiedOn),
         {},
       );
-      await histories.softDelete(created.todoHistoryId);
+      await templates.softDelete(template.todoId);
 
       expect(
         await histories.findByTodoIdAndHistoriedOn(
@@ -624,12 +822,6 @@ describe('Todos Repository (e2e)', () => {
               // 소유자가 어긋난다.
               userId: attacker.userId,
               historiedOn: parseLocalDateKey('2026-08-20'),
-              title: victimTemplate.title,
-              description: null,
-              todoType: 'GENERAL',
-              completeType: 'DAILY',
-              remindAt: null,
-              shouldDoAt: null,
               targetValue: null,
               targetUnit: null,
             },
