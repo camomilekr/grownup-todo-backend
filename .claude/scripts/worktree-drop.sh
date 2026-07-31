@@ -4,7 +4,8 @@
 #
 #   .claude/scripts/worktree-drop.sh <이름> [--drop-docs]
 #
-# docs/(계획서·개발 루프 기록)는 추적되지 않아 worktree remove가 함께 지운다.
+# 계획서와 개발 루프 기록(docs/plan, docs/dev-loop)은 커밋하지 않으므로 추적되지 않는
+# 파일이고, worktree remove가 그것을 함께 지운다.
 # 그래서 기본값은 저장소 루트로 꺼내는 것이고, 버리려면 --drop-docs를 준다.
 set -euo pipefail
 

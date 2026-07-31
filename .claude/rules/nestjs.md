@@ -16,7 +16,6 @@ src/
     todos.service.ts
     todos.repository.ts
     dto/create-todo.dto.ts
-    entities/todo.entity.ts
     todos.service.spec.ts
     CONTEXT.md
 ```
@@ -27,8 +26,9 @@ src/
 | `*.service.ts` | 비즈니스 로직 |
 | `*.repository.ts` | 영속화 접근 |
 | `*.dto.ts` | 요청·응답 형태. 클래스로 쓴다 (`interface`는 런타임에 사라져 검증이 걸리지 않는다) |
-| `*.entity.ts` | 영속화 스키마 |
 | `*.spec.ts` | 테스트 |
+
+**`*.entity.ts` 파일을 만들지 않는다.** 영속화 스키마는 `prisma/schema.prisma` 한 곳이고, 모델 타입은 `prisma generate`가 `src/generated/prisma`에 만들어 준다. 그것과 별도로 엔티티 클래스를 두면 같은 구조가 두 곳에 살면서 한쪽만 고쳐지는 날이 오고, 그때 어느 쪽이 진짜인지 판단할 근거가 없다. 도메인 타입이 필요하면 생성된 모델 타입을 가져와 좁혀 쓴다(`src/todos/todo-histories.repository.ts`의 `TodoHistorySnapshot`이 그 예다).
 
 **파일명은 케밥케이스, 클래스명은 파스칼케이스다.** `create-todo.dto.ts` → `CreateTodoDto`.
 
@@ -106,10 +106,9 @@ private readonly logger = new Logger(TodosService.name);
 
 **테스트 파일은 `*.spec.ts`이고 대상 파일 옆에 둔다.** `package.json`의 jest `testRegex`가 `.*\.spec\.ts$`, `rootDir`이 `src`다 — **`.test.ts`로 쓰면 실행되지 않는다.** e2e만 `test/` 아래에 두고 `npm run test:e2e`로 돌린다.
 
-TDD 순서와 무엇을 테스트하는지는 `.claude/rules/testing.md`를 따른다. 이 저장소에서 달라지는 것은 셋이다.
+TDD(실패하는 테스트를 먼저 쓰는 개발 순서)와 무엇을 테스트하는지는 `.claude/rules/testing.md`를 따른다. 프레임워크 때문에 그 문서에 더해지는 것이 둘이다.
 
-- **파일 확장자는 `.spec.ts`다** (`testing.md`의 `.test.ts` 조항은 적용하지 않는다)
-- 컴포넌트 테스트 대신 **Service 단위 테스트**가 중심이다. `@nestjs/testing`의 `Test.createTestingModule`로 대상 Service만 실제 Provider로 두고 의존성은 대역으로 바꾼다
-- Controller는 단위 테스트보다 **`supertest` e2e**가 값어치가 크다. 라우팅·파이프·필터가 함께 걸린 상태를 확인해야 하기 때문이다
+- **Service 단위 테스트를 어떻게 세우는가** — `@nestjs/testing`의 `Test.createTestingModule`로 대상 Service만 실제 Provider로 두고 의존성은 대역으로 바꾼다
+- **Controller는 단위 테스트보다 `supertest` e2e가 값어치가 크다.** 라우팅·파이프·필터가 함께 걸린 상태를 확인해야 하기 때문이다 — 그것들을 벗겨 낸 Controller는 Service를 한 번 부르는 함수라 검증할 것이 남지 않는다
 
 **DB를 실제로 붙이는 테스트는 e2e로 분류한다.** 단위 테스트에 붙이면 느려지고, 느린 테스트는 결국 실행되지 않는다.
