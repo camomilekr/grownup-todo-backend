@@ -146,7 +146,11 @@ export class TodoTemplatesRepository {
           none: { deletedAt: null, completedAt: { not: null } },
         },
       },
-      orderBy: { createdAt: 'asc' },
+      // `createdAt`은 밀리초까지만 저장하므로 빠르게 연속 생성하거나 한 트랜잭션에서
+      // 여러 건을 만들면 값이 겹칠 수 있다. 그때 정렬키가 하나뿐이면 순서를 DB가
+      // 정하게 되어 같은 조회가 실행할 때마다 다른 차례로 나올 수 있다. 유일 키를
+      // 2차 정렬키로 두면 겹쳐도 순서가 하나로 정해진다.
+      orderBy: [{ createdAt: 'asc' }, { todoId: 'asc' }],
     });
   }
 
@@ -185,7 +189,11 @@ export class TodoTemplatesRepository {
       include: {
         histories: { where: { historiedOn, deletedAt: null } },
       },
-      orderBy: { createdAt: 'asc' },
+      // `createdAt`은 밀리초까지만 저장하므로 빠르게 연속 생성하거나 한 트랜잭션에서
+      // 여러 건을 만들면 값이 겹칠 수 있다. 그때 정렬키가 하나뿐이면 순서를 DB가
+      // 정하게 되어 같은 조회가 실행할 때마다 다른 차례로 나올 수 있다. 유일 키를
+      // 2차 정렬키로 두면 겹쳐도 순서가 하나로 정해진다.
+      orderBy: [{ createdAt: 'asc' }, { todoId: 'asc' }],
     });
   }
 }
