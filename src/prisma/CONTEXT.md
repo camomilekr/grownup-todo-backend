@@ -62,7 +62,15 @@ enum은 `CompleteType`(일회성 `ONCE`·매일 반복 `DAILY`)과 `TodoType`(�
 
 ### DB가 강제하는 것과 코드가 지켜야 하는 것
 
-**소유자 일치는 DB가 강제한다.** `todo_history`는 `(todo_id, user_id)` **복합 FK**로 `todo_template`을 참조한다(`todo_history_todo_id_user_id_fkey`). 그래서 남의 `todoId`에 자기 `userId`를 붙인 행은 삽입 자체가 거절된다 — 실측하면 `insert or update on table "todo_history" violates foreign key constraint "todo_history_todo_id_user_id_fkey"`다. 이 FK의 참조 대상을 만들기 위해 `todo_template`에 `@@unique([todoId, userId])`가 있다(PK와 논리적으로 중복이지만 Postgres가 복합 FK에 유니크 제약을 요구한다). **`user_id`는 그래도 반드시 template에서 복제해라** — FK는 값이 일치하는지만 보고 어디서 왔는지는 모른다.
+**소유자 일치는 DB가 강제한다. 다만 "일치"의 뜻이 좁다.** `todo_history`는 `(todo_id, user_id)` **복합 FK**로 `todo_template`을 참조한다(`todo_history_todo_id_user_id_fkey`). 그래서 남의 `todoId`에 자기 `userId`를 붙인 행은 삽입 자체가 거절된다 — 실측하면 `insert or update on table "todo_history" violates foreign key constraint "todo_history_todo_id_user_id_fkey"`다. 이 FK의 참조 대상을 만들기 위해 `todo_template`에 `@@unique([todoId, userId])`가 있다(PK와 논리적으로 중복이지만 Postgres가 복합 FK에 유니크 제약을 요구한다).
+
+**그 FK가 강제하는 것은 "기록에 적힌 소유자가 그 할 일의 실제 소유자인가"다. "요청자가 그 소유자인가"는 강제하지 못한다** — DB는 요청자가 누구인지 모른다. 그 둘의 차이가 코드의 몫이고, `TodoHistoriesRepository.upsertForHistoriedOn`의 확인 조회가 그 자리를 맡는다(`(todo_id, user_id)`로 정의를 찾아 없으면 거절한다).
+
+**그래서 `user_id`에 넣는 값은 요청자의 식별자여야 한다.** FK는 값이 일치하는지만 보고 **어디서 왔는지는 모른다.** 소유자로 좁히지 않고 읽은 정의에서 복제하면 그 값이 제3자의 것이어도 정의와 일치하므로 **FK도, 앞서는 소유자 검사도 둘 다 통과한다.** 근거와 실패 경로는 `src/todos/todo-histories.repository.ts`의 `TodoHistorySnapshot` 주석에 있다.
+
+**이 지시는 한 곳에 있지 않았다.** 코드 주석·스키마 주석·폴더 문서·저장소 문서·마이그레이션 SQL, 그리고 **실제 DB의 컬럼 코멘트**까지 여러 계층에 같은 말이 흩어져 있었고 방향을 뒤집을 때 전부 찾아야 했다. **그래서 이런 서술을 고칠 때는 저장소를 `grep`하는 것만으로 부족하다** — DB 코멘트와 `prisma generate` 산출물까지 봐야 한다.
+
+**어긋남을 잡아 주는 자동 관문은 없다.** `test/schema-guard.e2e-spec.ts`는 코멘트의 **존재**만 보고 내용을 비교하지 않으며(목록을 하드코딩하지 않는 설계의 대가다), `migrate diff`도 코멘트를 비교 대상에 넣지 않는다. **컬럼 코멘트만 고치는 마이그레이션은 `--create-only`로 만들면 빈 파일이 나오는 것이 정상이고**(구조 차이가 없다) 거기에 `COMMENT ON COLUMN`을 손으로 넣는다.
 
 **ONCE의 "히스토리 한 건"은 DB가 강제하지 못한다.** 제약은 `(todo_id, historied_on)` 하나뿐이라 DAILY의 "날짜별 한 행"만 직접 표현한다. ONCE가 단건이 되는 것은 **`historied_on`이 template당 하나로 고정되기 때문**이고, 그 값을 만드는 것은 `src/todos/todo-local-date.ts`의 `toHistoriedOn` 하나다.
 

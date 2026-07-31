@@ -1,6 +1,6 @@
 # todo 스키마
 
-> 기준: `prisma/schema.prisma` · 마이그레이션 `20260731075406_init_todo_entities`
+> 기준: `prisma/schema.prisma` · 마이그레이션 `20260731075406_init_todo_entities`(테이블 생성)와 `20260731164011_fix_todo_history_user_id_comment`(컬럼 코멘트 수정)
 
 ## 전체 그림부터
 
@@ -129,7 +129,7 @@ appUser ──┬─< todoTemplate ──< todoHistory
 |---|---|---|---|---|---|
 | `todoHistoryId` | `todo_history_id` | `BIGSERIAL` | true | PK | id |
 | `todoId` | `todo_id` | `bigint` | true | 묶음 FK | 어떤 할 일의 기록인지 |
-| `userId` | `user_id` | `bigint` | true | 묶음 FK + FK → `app_user` | 소유자. **반드시 정의에서 가져와 채운다** |
+| `userId` | `user_id` | `bigint` | true | 묶음 FK + FK → `app_user` | 소유자. **요청자의 식별자를 넣는다** (아래 입력 경계 표) |
 | `historiedOn` | `historied_on` | `date` | true | UNIQUE의 일부 | 이 기록이 속한 날짜. **의미가 반복 방식에 따라 갈린다** (아래) |
 | `targetValue` | `target_value` | `numeric(12,2)` | false | | 그날 기준의 목표 수치 (정의에서 복사) |
 | `targetUnit` | `target_unit` | `varchar(16)` | false | | 그날 기준의 목표 단위 (정의에서 복사) |
@@ -202,7 +202,15 @@ appUser ──┬─< todoTemplate ──< todoHistory
 | `time_zone` | IANA 타임존 이름인지 (`Intl.supportedValuesOf('timeZone')`) | **그 유저의 모든 날짜 계산이 계속 실패한다** |
 | `remind_at` | `HH:mm` 형식인지 (00~23시, 00~59분). 정규식은 표 아래에 | 알림 대상을 문자열 일치로 찾으므로 **오류 하나 없이 영영 알림이 가지 않는다** |
 | `active_from`·`active_until` | `parseLocalDateKey`로 만든 값 | 직접 만든 날짜는 **하루 밀려 저장된다** |
-| `todo_history.user_id` | 정의에서 가져와 채운다 | 묶음 외래키가 막아 주지만, 그 오류는 원인을 알기 어렵다 |
+| `todo_history.user_id` | **요청자의 식별자**를 넣는다 (표 아래 설명) | 소유자 검사와 묶음 외래키를 **둘 다 통과해** 남의 할 일에 기록이 쓰인다 |
+
+`todo_history.user_id`는 다른 넷과 성질이 다르다. 형식을 다듬는 문제가 아니라 **값을 어디서 가져오는가**의 문제이고, 어겼을 때 아무 오류도 나지 않는다.
+
+완료 기록을 저장하는 경로(`upsertForHistoriedOn`)가 `(todo_id, user_id)`로 정의를 찾아 **소유자를 검사한다.** 그래서 이 값이 요청자를 가리켜야 남의 할 일에 기록을 붙이려는 요청이 그 자리에서 걸린다. **정의 행에서 읽은 값을 그대로 옮기면 그 검사가 무력화될 수 있다** — 소유자로 좁혀 읽은 정의라면 그 값이 요청자와 같아 결과가 다르지 않지만, 좁히지 않고 읽은 정의에서 가져오면 그 정의와 자기 자신을 비교하는 동어반복이 된다.
+
+**그 경로에서는 묶음 외래키도 통과한다.** 값이 정의와 일치하기 때문이다 — 요청자가 아닌 제3자의 것으로 일치할 뿐이고, 외래키는 값이 맞는지만 보고 어디서 왔는지는 모른다. 두 겹이 모두 뚫리는 유일한 경로다. 실패 경로와 근거는 `src/todos/todo-histories.repository.ts`의 `TodoHistorySnapshot` 주석에 있다.
+
+**실제 데이터베이스의 컬럼 코멘트도 이 방향으로 갱신했다**(마이그레이션 `20260731164011_fix_todo_history_user_id_comment`). 이 방향이 어떻게 뒤집혔는지는 그 파일의 SQL 주석에 있다.
 
 `remind_at`에 쓸 정규식이다. 표 안에 두면 마크다운이 파이프를 열 구분자로 읽어 표가
 깨지므로(이스케이프하면 렌더링은 되지만 raw 텍스트에서 복사하면 틀린 식이 된다) 여기에
