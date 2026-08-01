@@ -6,6 +6,10 @@ import {
 } from '@nestjs/common';
 import { UsersRepository } from '../users/users.repository';
 import {
+  TodoTemplateDeletedError,
+  TodoTemplateNotFoundError,
+} from './todo-errors';
+import {
   parseLocalDateKey,
   toHistoriedOn,
   toLocalDateKey,
@@ -13,17 +17,20 @@ import {
 // `Prisma`만 값으로 가져온다. `PrismaClientKnownRequestError`를 `instanceof`로 판별해야
 // 하기 때문이다 — 오류 코드 문자열만 보면 그 속성을 가진 아무 객체나 통과한다.
 import { Prisma } from '../generated/prisma/client';
+import type { TodoHistory, TodoTemplate } from '../generated/prisma/client';
 import type { CompleteType, TodoType } from '../generated/prisma/enums';
 import { TodoHistoriesRepository } from './todo-histories.repository';
+import type { TodoHistoryChanges } from './todo-histories.repository';
 import { TodoTemplatesRepository } from './todo-templates.repository';
 import type { UpdateTodoTemplateInput } from './todo-templates.repository';
 import {
   narrowByCompleteType,
   toDailyTodoDetail,
   toOnceTodoDetail,
+  toProgress,
   toTodoListItem,
 } from './todo-view';
-import type { TodoDetail, TodoListItem } from './todo-view';
+import type { TodoDetail, TodoListItem, TodoProgress } from './todo-view';
 
 /**
  * 상세 조회가 이력을 가져올 기간. **양 끝 날짜를 포함한다.**
@@ -78,6 +85,22 @@ export type UpdateTodoInput = {
 };
 
 /**
+ * 진행값을 저장할 때 받는 값.
+ *
+ * **`performedAt`이 어느 날짜의 기록인지를 정한다.** 매일 반복은 그 순간이 유저에게
+ * 며칠인지가 곧 기록의 날짜다 — 유저마다 하루가 바뀌는 자리가 달라서 날짜가 아니라 순간으로
+ * 받는다. 일회성은 키가 정의 생성 시각에서 나와 이 값을 쓰지 않는다(`toHistoriedOn`).
+ *
+ * **완료 여부는 여기 없다.** 진행값이 목표치를 넘겨도 서버가 완료를 찍지 않고, 완료는
+ * `completeTodo`가 따로 받는다(사용자 확정) — 근거는 그 메서드 주석에 있다.
+ */
+export type SaveProgressInput = {
+  /** 그날 달성한 값. **`0`도 유효한 입력이다** — 저장하지 않은 것과 다른 상태다 */
+  progressValue: number;
+  performedAt: Date;
+};
+
+/**
  * 검증이 보는 할 일의 최종 형태. 만들기는 입력에서, 고치기는 **입력과 저장된 값을 합쳐**
  * 이 형태를 만든 뒤 같은 규칙을 통과시킨다.
  */
@@ -126,6 +149,10 @@ function omitUndefined<T extends object>(source: T): T {
  * 입력 규칙을 `assertShape` 한 곳에 모아 만들기와 고치기가 **같은 규칙**을 통과한다는 것,
  * 다른 하나는 이미 있는 행을 다루는 둘이 먼저 `findById(userId, todoId)`로 정의를
  * 읽는다는 것이다.
+ *
+ * **기록을 다루는 쓰기가 진행값 저장·완료·완료 취소 셋이다.** 셋 다 정의를 소유자로 좁혀
+ * 읽고(`readOwnTemplate`), `toHistoriedOn`으로 날짜 키를 만들고(`resolveHistoriedOn`),
+ * 저장 통로 하나를 지난다(`writeHistoryOn`). 그 뒤로 갈리는 것은 각 메서드 주석에 있다.
  */
 @Injectable()
 export class TodosService {
@@ -263,9 +290,9 @@ export class TodosService {
       activeUntil,
     });
 
-    // 주지 않은 값을 `null`로 못 박아 넘긴다. `undefined`로 두면 Prisma가 컬럼을 빼고
-    // DB 기본값에 맡기는데, 이 테이블의 그 컬럼들은 기본값이 없어 결과가 같기는 하다 —
-    // 그래도 명시하면 무엇이 저장되는지가 이 자리에서 읽힌다.
+    // `?? null`로 못 박은 자리는 값을 주지 않았을 때 무엇이 저장되는지를 이 자리에서 읽게
+    // 하려는 것이다. `undefined`로 둬도 결과는 같다 — Prisma가 그 컬럼을 빼고, 이 테이블의
+    // 해당 컬럼들에는 기본값이 없다.
     const created = await this.templates.create({
       userId,
       title: input.title,
@@ -375,6 +402,220 @@ export class TodosService {
   }
 
   /**
+   * 그날 달성한 진행값을 저장한다. 그 날짜의 기록이 없으면 만들어진다.
+   *
+   * **목표치를 채워도 완료로 찍지 않는다**(사용자 확정). 저장 하나가 두 가지 사실을 동시에
+   * 바꾸면, 진행값을 잘못 입력해 목표를 넘겼을 때 완료가 딸려 오고 되돌리려면 두 번
+   * 고쳐야 한다. 완료는 `completeTodo`가 받는 별도의 요청이다.
+   *
+   * **완료 시각을 갱신 대상에 넣지 않는다.** 이미 완료한 날의 진행값을 고쳐도 완료 표시가
+   * 그대로 남는다 — 이 메서드가 답하는 사실이 "얼마나 했는가" 하나이기 때문이다.
+   *
+   * @throws {NotFoundException} 그런 할 일이 없거나 남의 것일 때, 타임존을 읽을 유저가 없을 때
+   * @throws {BadRequestException} 일반(GENERAL) 할 일일 때
+   */
+  async saveProgress(
+    userId: bigint,
+    todoId: bigint,
+    input: SaveProgressInput,
+  ): Promise<TodoProgress> {
+    const template = await this.readOwnTemplate(userId, todoId);
+
+    // 일반 할 일에는 목표치를 둘 수 없으므로(`assertShape`) 진행값을 그릴 기준이 없다.
+    // 저장해 두면 화면이 분모 없는 진행률을 만들려 하고, 그 값을 되돌릴 경로도 없다 —
+    // 체크만 하는 할 일의 상태는 완료 여부 하나이고 그것은 `completeTodo`가 맡는다.
+    if (template.todoType === 'GENERAL') {
+      throw new BadRequestException(
+        `이 종류의 할 일에는 진행값을 둘 수 없다 (todoType=${template.todoType})`,
+      );
+    }
+
+    const historiedOn = await this.resolveHistoriedOn(
+      userId,
+      template,
+      input.performedAt,
+    );
+
+    return this.writeHistoryOn(userId, template, historiedOn, {
+      progressValue: input.progressValue,
+    });
+  }
+
+  /**
+   * 할 일을 완료로 표시한다. 그 날짜의 기록이 없으면 만들어진다 — 진행값 없이 완료만 찍는
+   * 일반(GENERAL) 할 일이 그 경우다.
+   *
+   * **진행값을 갱신 대상에 넣지 않는다.** 이미 입력한 진행값이 그대로 남고
+   * (`upsertForHistoriedOn`은 `changes`에 담은 것만 갱신한다), 목표치를 채우지 않은 채
+   * 완료하는 것도 사용자의 선택이라 여기서 막지 않는다.
+   *
+   * @param performedAt 완료한 순간. **두 곳에 쓰인다** — 매일 반복이 어느 날짜의 기록인지
+   *   정하는 값이고(일회성은 쓰지 않는다), 그대로 완료 시각으로 저장된다. 두 값을 따로
+   *   받으면 8월 2일 기록에 8월 5일 완료 시각이 들어가는 조합이 만들어진다
+   * @throws {NotFoundException} 그런 할 일이 없거나 남의 것일 때, 타임존을 읽을 유저가 없을 때
+   */
+  async completeTodo(
+    userId: bigint,
+    todoId: bigint,
+    performedAt: Date,
+  ): Promise<TodoProgress> {
+    const template = await this.readOwnTemplate(userId, todoId);
+    const historiedOn = await this.resolveHistoriedOn(
+      userId,
+      template,
+      performedAt,
+    );
+
+    return this.writeHistoryOn(userId, template, historiedOn, {
+      completedAt: performedAt,
+    });
+  }
+
+  /**
+   * 완료 표시를 지운다. **행을 지우는 것이 아니라 완료 시각을 비우는 수정이고** 진행값은
+   * 그대로 남는다.
+   *
+   * 삭제가 아닌 이유는 일회성 할 일에 있다. 그쪽 날짜 키는 정의당 하나로 고정돼 기록
+   * 슬롯이 평생 하나뿐이라, 취소가 삭제였다면 그 하나가 지워진 행에 막혀 **영영 완료할 수
+   * 없는 할 일**이 된다(목록에는 계속 보이는데 체크가 안 된다).
+   *
+   * **그날 기록이 없으면 거절한다.** 저장 경로는 행이 없으면 만들기 때문에, 그대로 부르면
+   * 진행값도 완료 시각도 빈 행이 생긴다. 그러면 "기록이 없다 = 아직 손대지 않았다"가
+   * 성립하지 않아 손대지 않은 할 일과 구별되지 않는다.
+   *
+   * **기록이 있는지만 보고 완료 여부는 보지 않는다.** 이미 완료가 아닌 기록에 불러도
+   * 거절하지 않는다 — 두 화면에서 취소를 두 번 누르는 것이 정상 조작이라, 그것을 오류로
+   * 만들면 사용자가 취소에 실패한 것으로 읽는다.
+   *
+   * @param performedAt 어느 날짜의 기록을 취소하는지 정하는 순간. 매일 반복만 쓴다
+   * @throws {NotFoundException} 할 일이 없거나 남의 것일 때, **그날 기록이 없을 때**,
+   *   타임존을 읽을 유저가 없을 때
+   */
+  async uncompleteTodo(
+    userId: bigint,
+    todoId: bigint,
+    performedAt: Date,
+  ): Promise<TodoProgress> {
+    const template = await this.readOwnTemplate(userId, todoId);
+    const historiedOn = await this.resolveHistoriedOn(
+      userId,
+      template,
+      performedAt,
+    );
+
+    const stored = await this.histories.findByTodoIdAndHistoriedOn(
+      userId,
+      todoId,
+      historiedOn,
+    );
+    if (stored === null) {
+      // **날짜를 메시지에 담지 않는다.** 일회성의 이 값은 표시용 날짜가 아니라 중복을 막는
+      // 열쇠라서 밖으로 내보내지 않는다(`todo-local-date.ts`). 뷰 계층이 이력 항목 변환
+      // 함수를 내보내지 않아 막아 둔 경로를, 오류 메시지가 우회하게 두지 않으려는 것이다.
+      throw new NotFoundException(`취소할 완료 기록이 없다 (todoId=${todoId})`);
+    }
+
+    return this.writeHistoryOn(userId, template, historiedOn, {
+      completedAt: null,
+    });
+  }
+
+  /**
+   * 요청자의 할 일 정의를 읽는다. 없거나 남의 것이면 **"없는 것"으로 거절한다** — 권한
+   * 없음으로 구분해 알려 주면 번호를 훑어서 남이 어떤 할 일을 가졌는지 세어 볼 수 있다.
+   *
+   * **기록 쓰기 셋이 이것을 반드시 먼저 거친다.** 이유가 셋이다. 남의 할 일을 거르는 것이
+   * 하나, 날짜 키와 목표치를 정의에서 얻어야 하는 것이 둘, **소유자로 좁혀 읽은 정의라야
+   * 저장 경로에 넘길 소유자 값이 요청자와 같다는 것이 보장되는 것**이 셋이다
+   * (`TodoHistorySnapshot`).
+   *
+   * @throws {NotFoundException} 그런 할 일이 없거나 남의 것일 때
+   */
+  private async readOwnTemplate(
+    userId: bigint,
+    todoId: bigint,
+  ): Promise<TodoTemplate> {
+    const template = await this.templates.findById(userId, todoId);
+    if (template === null) {
+      throw new NotFoundException(`그런 할 일이 없다 (todoId=${todoId})`);
+    }
+
+    return template;
+  }
+
+  /**
+   * 기록을 쓸 날짜 키를 만든다. **`toHistoriedOn`이 유일한 통로다** — 반복 방식에 따라
+   * 규칙이 완전히 다르고, 그 선택을 부르는 쪽에 맡기면 일회성에 매일 반복 규칙을 쓰는
+   * 코드가 컴파일도 되고 테스트도 통과한다(`todo-local-date.ts`).
+   *
+   * **매일 반복만 유저 타임존을 읽는다.** 일회성 키는 정의 생성 시각의 UTC 날짜라 타임존이
+   * 결과를 바꾸지 않으므로, 읽으면 조회가 하나 늘고 "탈퇴하지 않은 유저인지"가 기록 저장의
+   * 성공 여부를 바꾸게 된다. `getTodo`의 일회성 갈래와 같은 판단이다.
+   *
+   * @throws {NotFoundException} 매일 반복인데 타임존을 읽을 유저가 없을 때
+   */
+  private async resolveHistoriedOn(
+    userId: bigint,
+    template: TodoTemplate,
+    performedAt: Date,
+  ): Promise<Date> {
+    // 일회성 갈래에 넘기는 `'UTC'`는 결과에 영향을 주지 않는 자리 채우기다 —
+    // `toHistoriedOn`이 그 갈래에서 이 값을 쓰지 않는다.
+    const timeZone =
+      template.completeType === 'DAILY'
+        ? await this.readTimeZone(userId)
+        : 'UTC';
+
+    return toHistoriedOn({
+      completeType: template.completeType,
+      createdAt: template.createdAt,
+      performedAt,
+      timeZone,
+    });
+  }
+
+  /**
+   * 그 날짜의 기록에 바뀐 값을 쓰고 **결과 상태를 돌려준다.** 기록 쓰기 셋이 공유한다.
+   *
+   * @param userId **요청자의 식별자.** 정의 행의 소유자 컬럼을 복제하지 않는다 — 저장
+   *   경로의 확인 조회가 이 값으로 정의를 찾아 소유자를 검사하므로, 정의에서 복제하면 그
+   *   정의와 자기 자신을 비교하는 동어반복이 되어 아무것도 거르지 못한다. 위
+   *   `readOwnTemplate`이 소유자로 좁혀 읽어 두 값이 같기는 하지만, **요청자를 넘기는
+   *   형태를 지켜야** 좁히지 않고 읽는 코드가 생겨도 그 검사가 살아 있다
+   *   (`TodoHistorySnapshot`)
+   * @param changes 갱신할 값만 담는다. **담지 않은 값은 그대로 남는다**
+   */
+  private async writeHistoryOn(
+    userId: bigint,
+    template: TodoTemplate,
+    historiedOn: Date,
+    changes: TodoHistoryChanges,
+  ): Promise<TodoProgress> {
+    let saved: TodoHistory;
+    try {
+      saved = await this.histories.upsertForHistoriedOn(
+        {
+          todoId: template.todoId,
+          userId,
+          historiedOn,
+          // 그날 기준의 목표치를 남긴다. 복사하지 않으면 목표를 5에서 8로 올렸을 때 5를
+          // 채웠던 날의 달성률이 소급해 바뀐다. 새로 만들 때만 반영되므로 지나간 기록의
+          // 목표치는 나중 변경에 흔들리지 않는다(`TodoHistorySnapshot`).
+          targetValue: template.targetValue,
+          targetUnit: template.targetUnit,
+        },
+        changes,
+      );
+    } catch (error) {
+      throw this.toHistoryTargetNotFound(error, template.todoId);
+    }
+
+    // 저장 결과는 반드시 행 하나라서 `null` 갈래에 도달하지 않는다. 그래서 반환 타입을
+    // `TodoProgress`로 좁혀 두었다 — `strictNullChecks`가 꺼져 있어 컴파일된다.
+    return toProgress(saved);
+  }
+
+  /**
    * 할 일의 **최종 형태**가 규칙에 맞는지 본다.
    *
    * **만들기와 고치기가 이 함수 하나를 통과한다.** 규칙을 두 곳에 두면 한쪽만 고쳐지는
@@ -481,6 +722,36 @@ export class TodosService {
       error instanceof Prisma.PrismaClientKnownRequestError &&
       error.code === PRISMA_RECORD_NOT_FOUND
     ) {
+      return new NotFoundException(`그런 할 일이 없다 (todoId=${todoId})`);
+    }
+
+    return error;
+  }
+
+  /**
+   * 기록 쓰기가 실패했을 때 던질 오류를 고른다. **Repository의 도메인 오류 둘만
+   * `NotFoundException`으로 바꾸고 나머지는 그대로 돌려준다.**
+   *
+   * **두 오류를 같은 응답으로 합친다.** 지워진 행이 실제로 있다는 사실을 알려 주면 번호를
+   * 훑어서 남이 어떤 할 일을 가졌는지 세어 볼 수 있고, 사용자가 할 수 있는 일도 같다.
+   * 대신 **원본 메시지를 로그에 남긴다** — 오타로 잘못된 번호를 보낸 것과 실제로 지워진
+   * 행이 있는 것은 원인을 찾는 사람에게 다른 사실이고, 두 오류를 따로 둔 값어치가 거기에
+   * 있다(`todo-errors.ts`).
+   *
+   * `instanceof`로 판별한다. 메시지 문자열로 구분하면 문구를 다듬는 순간 조용히 깨진다.
+   *
+   * **`P2025`(고칠 행을 찾지 못했다)를 여기서 다루지 않는다.** 저장이 없으면 만드는
+   * 동작이라 고칠 행을 찾지 못하는 경우가 없고, 도달하지 않는 분기를 넣으면 그것이 무엇을
+   * 막는지 아무도 확인할 수 없다.
+   */
+  private toHistoryTargetNotFound(error: unknown, todoId: bigint): unknown {
+    if (
+      error instanceof TodoTemplateNotFoundError ||
+      error instanceof TodoTemplateDeletedError
+    ) {
+      // 클라이언트가 대상을 잘못 가리킨 것이므로 `error`가 아니라 `warn`이다.
+      this.logger.warn(error.message);
+
       return new NotFoundException(`그런 할 일이 없다 (todoId=${todoId})`);
     }
 

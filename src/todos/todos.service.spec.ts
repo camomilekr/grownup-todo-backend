@@ -3,8 +3,16 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { Prisma } from '../generated/prisma/client';
 import type { TodoHistory, TodoTemplate } from '../generated/prisma/client';
 import { UsersRepository } from '../users/users.repository';
+import {
+  TodoTemplateDeletedError,
+  TodoTemplateNotFoundError,
+} from './todo-errors';
 import { parseLocalDateKey } from './todo-local-date';
 import { TodoHistoriesRepository } from './todo-histories.repository';
+import type {
+  TodoHistoryChanges,
+  TodoHistorySnapshot,
+} from './todo-histories.repository';
 import type { TodoTemplateWithHistories } from './todo-templates.repository';
 import { TodoTemplatesRepository } from './todo-templates.repository';
 import type { CreateTodoInput } from './todos.service';
@@ -852,6 +860,452 @@ describe('TodosService', () => {
       await expect(service.deleteTodo(USER_ID, 1n)).rejects.toThrow(
         NotFoundException,
       );
+    });
+  });
+
+  describe('기록 쓰기', () => {
+    /**
+     * 한국 시간대(Asia/Seoul) 자정 직전이다. UTC 기준으로는 8월 1일이지만 유저가 보는
+     * 날짜는 8월 2일이라, **매일 반복 키를 유저 타임존으로 만드는지**가 이 값에서 갈린다.
+     */
+    const PERFORMED_AT = new Date('2026-08-01T15:00:00.000Z');
+
+    const dailyTemplate = createTemplate({ completeType: 'DAILY' });
+    // 일회성에는 활성 기간을 둘 수 없다(`assertShape`). 저장된 값이 그 규칙을 지킨다는
+    // 전제를 픽스처가 어기지 않게 비워 둔다.
+    const onceTemplate = createTemplate({
+      completeType: 'ONCE',
+      activeFrom: null,
+    });
+
+    /**
+     * 저장 경로가 넘긴 목표치·진행값을 `numeric` 컬럼의 실제 형태로 되돌린다. Prisma는 그
+     * 컬럼을 `Prisma.Decimal`로 돌려주므로, 숫자를 그대로 두면 뷰 변환이 `toNumber()`를
+     * 부르는 자리에서 터진다.
+     */
+    function toDecimalOrNull(
+      value: Prisma.Decimal | string | number | null | undefined,
+    ): Prisma.Decimal | null {
+      return value == null ? null : new Prisma.Decimal(value);
+    }
+
+    beforeEach(() => {
+      templates.findById.mockResolvedValue(dailyTemplate);
+      // 완료 취소가 확인하는 "그날 기록". 없는 경우를 보는 테스트만 `null`로 덮는다.
+      histories.findByTodoIdAndHistoriedOn.mockResolvedValue(createHistory());
+      // 저장한 값이 반환값에 그대로 비치게 하는 대역이다.
+      //
+      // **실제 upsert와 다른 점이 하나 있다.** 고치는 쪽으로 갈 때 DB는 `changes`에 없는
+      // 컬럼을 건드리지 않지만 이 대역은 넘긴 값만 비춘다. 그래서 "진행값을 건드리지
+      // 않는다"는 반환값이 아니라 **`changes`에 그 키가 없는 것**으로 확인한다.
+      histories.upsertForHistoriedOn.mockImplementation(
+        (snapshot: TodoHistorySnapshot, changes: TodoHistoryChanges) =>
+          Promise.resolve(
+            createHistory({
+              todoId: snapshot.todoId,
+              userId: snapshot.userId,
+              historiedOn: snapshot.historiedOn,
+              targetValue: toDecimalOrNull(snapshot.targetValue),
+              targetUnit: snapshot.targetUnit,
+              progressValue: toDecimalOrNull(changes.progressValue),
+              completedAt: changes.completedAt ?? null,
+            }),
+          ),
+      );
+    });
+
+    /**
+     * 기록 쓰기 셋을 **같은 규칙으로** 돌리기 위한 호출자 목록이다. 셋이 소유자 검사·날짜
+     * 키·오류 변환을 공유하므로, 어느 하나가 그 경로를 지나지 않게 바뀌면 아래 테스트들이
+     * 그 메서드에서만 실패한다.
+     */
+    const writers: [name: string, call: () => Promise<unknown>][] = [
+      [
+        'saveProgress',
+        () =>
+          service.saveProgress(USER_ID, 1n, {
+            progressValue: 300,
+            performedAt: PERFORMED_AT,
+          }),
+      ],
+      ['completeTodo', () => service.completeTodo(USER_ID, 1n, PERFORMED_AT)],
+      [
+        'uncompleteTodo',
+        () => service.uncompleteTodo(USER_ID, 1n, PERFORMED_AT),
+      ],
+    ];
+
+    it.each(writers)(
+      '%s는 남의 할 일이면 NotFoundException이고 저장하지 않는다',
+      async (_name, call) => {
+        // `findById`가 소유자를 조건에 넣으므로 `null`로 돌아온다.
+        templates.findById.mockResolvedValue(null);
+
+        await expect(call()).rejects.toThrow(NotFoundException);
+        expect(histories.upsertForHistoriedOn).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each(writers)(
+      '%s는 소유자를 조건으로 정의를 읽는다',
+      async (_name, call) => {
+        await call();
+
+        expect(templates.findById).toHaveBeenCalledWith(USER_ID, 1n);
+      },
+    );
+
+    it.each(writers)(
+      '%s는 정의가 아니라 요청자의 식별자를 snapshot에 넣는다',
+      async (_name, call) => {
+        // 실제 `findById(userId, todoId)`는 소유자로 좁혀 읽으므로 이런 정의가 돌아올 수
+        // 없다. 대역으로 그 상황을 만드는 이유는 **정의 행에서 소유자를 복제하는 변이**를
+        // 잡는 것이다 — 좁히지 않고 읽는 코드가 생기면 그 복제가 저장 경로의 소유자
+        // 검사를 동어반복으로 만들어 남의 할 일에 기록이 쓰인다(`TodoHistorySnapshot`).
+        templates.findById.mockResolvedValue(
+          createTemplate({ completeType: 'DAILY', userId: 999n }),
+        );
+
+        await call();
+
+        expect(histories.upsertForHistoriedOn).toHaveBeenCalledWith(
+          expect.objectContaining({ userId: USER_ID }),
+          expect.anything(),
+        );
+      },
+    );
+
+    it.each(writers)(
+      '%s는 목표치 한 쌍을 정의에서 복사해 snapshot에 넣는다',
+      async (_name, call) => {
+        // 그날 기준의 목표를 남기지 않으면 목표를 5에서 8로 올렸을 때 5를 채웠던 날의
+        // 달성률이 소급해 바뀐다.
+        templates.findById.mockResolvedValue(
+          createTemplate({
+            completeType: 'DAILY',
+            todoType: 'NUMERIC',
+            targetValue: new Prisma.Decimal('5'),
+            targetUnit: '회',
+          }),
+        );
+
+        await call();
+
+        const [snapshot] = histories.upsertForHistoriedOn.mock.calls[0] as [
+          TodoHistorySnapshot,
+        ];
+        expect(String(snapshot.targetValue)).toBe('5');
+        expect(snapshot.targetUnit).toBe('회');
+      },
+    );
+
+    it.each(writers)(
+      '%s는 그 할 일의 번호를 snapshot에 넣는다',
+      async (_name, call) => {
+        await call();
+
+        expect(histories.upsertForHistoriedOn).toHaveBeenCalledWith(
+          expect.objectContaining({ todoId: 1n }),
+          expect.anything(),
+        );
+      },
+    );
+
+    it.each(writers)(
+      '%s는 매일 반복이면 유저 타임존 기준 날짜를 키로 쓴다',
+      async (_name, call) => {
+        await call();
+
+        expect(histories.upsertForHistoriedOn).toHaveBeenCalledWith(
+          expect.objectContaining({
+            historiedOn: parseLocalDateKey('2026-08-02'),
+          }),
+          expect.anything(),
+        );
+      },
+    );
+
+    it.each(writers)(
+      '%s는 일회성이면 정의 생성 시각의 UTC 날짜를 키로 쓴다',
+      async (_name, call) => {
+        // 수행 시각이나 타임존이 키에 섞이면 일회성 기록이 둘 생긴다.
+        templates.findById.mockResolvedValue(onceTemplate);
+
+        await call();
+
+        expect(histories.upsertForHistoriedOn).toHaveBeenCalledWith(
+          expect.objectContaining({
+            historiedOn: parseLocalDateKey('2026-07-20'),
+          }),
+          expect.anything(),
+        );
+      },
+    );
+
+    it.each(writers)(
+      '%s는 일회성이면 유저 타임존을 읽지 않는다',
+      async (_name, call) => {
+        // 일회성 키는 UTC로 고정이라 타임존이 결과를 바꾸지 않는다. 읽으면 조회가 하나
+        // 늘고 "탈퇴하지 않은 유저인지"가 저장 성공 여부를 바꾸게 된다.
+        templates.findById.mockResolvedValue(onceTemplate);
+
+        await call();
+
+        expect(users.findTimeZone).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each(writers)(
+      '%s는 매일 반복이고 타임존을 읽을 유저가 없으면 NotFoundException이다',
+      async (_name, call) => {
+        users.findTimeZone.mockResolvedValue(null);
+
+        await expect(call()).rejects.toThrow(NotFoundException);
+        expect(histories.upsertForHistoriedOn).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each(writers)(
+      '%s는 할 일이 없다는 Repository 오류를 NotFoundException으로 바꾼다',
+      async (_name, call) => {
+        // 도메인 오류를 그대로 새게 두면 NestJS가 500으로 바꿔 "서버 오류"로 보인다.
+        histories.upsertForHistoriedOn.mockRejectedValue(
+          new TodoTemplateNotFoundError(1n),
+        );
+
+        await expect(call()).rejects.toThrow(NotFoundException);
+      },
+    );
+
+    it.each(writers)(
+      '%s는 지워진 할 일 오류도 NotFoundException으로 바꾼다',
+      async (_name, call) => {
+        // 응답은 위와 같게 합친다. 지워진 행이 실제로 있다는 사실은 클라이언트가 알
+        // 필요가 없고, 두 오류를 따로 둔 값어치는 로그에서 살아난다(`todo-errors.ts`).
+        histories.upsertForHistoriedOn.mockRejectedValue(
+          new TodoTemplateDeletedError(1n),
+        );
+
+        await expect(call()).rejects.toThrow(NotFoundException);
+      },
+    );
+
+    it.each(writers)(
+      '%s는 그 밖의 오류를 그대로 던진다',
+      async (_name, call) => {
+        // 오류를 가리지 않고 404로 바꾸면 진짜 장애가 "없는 할 일"로 위장하고 원인을 찾을
+        // 단서가 사라진다.
+        const failure = new Error('DB 연결이 끊겼다');
+        histories.upsertForHistoriedOn.mockRejectedValue(failure);
+
+        await expect(call()).rejects.toBe(failure);
+      },
+    );
+
+    describe('saveProgress', () => {
+      it('진행값을 저장하고 그 값이 담긴 progress를 돌려준다', async () => {
+        const progress = await service.saveProgress(USER_ID, 1n, {
+          progressValue: 300,
+          performedAt: PERFORMED_AT,
+        });
+
+        expect(progress.progressValue).toBe(300);
+        expect(histories.upsertForHistoriedOn).toHaveBeenCalledWith(
+          expect.anything(),
+          { progressValue: 300 },
+        );
+      });
+
+      it('진행값 0을 떨어뜨리지 않는다', async () => {
+        // **`0`과 `null`은 다르다** — 0을 입력한 것과 아직 손대지 않은 것이다. 떨어뜨리면
+        // 이미 있는 행의 진행값이 `null`로 덮여 "0을 입력했다"가 "아무것도 하지 않았다"로
+        // 바뀌고, 사용자가 `progress`를 그 형태로 고른 첫 번째 근거가 무너진다.
+        //
+        // 뷰 계층에도 같은 구별을 고정한 테스트가 있지만(`todo-view.spec.ts`) 그 지점은
+        // 값이 저장 통로에 넘어간 뒤라서, **여기서 값이 떨어지는 것은 그쪽이 잡지 못한다.**
+        const progress = await service.saveProgress(USER_ID, 1n, {
+          progressValue: 0,
+          performedAt: PERFORMED_AT,
+        });
+
+        expect(progress.progressValue).toBe(0);
+        expect(histories.upsertForHistoriedOn).toHaveBeenCalledWith(
+          expect.anything(),
+          { progressValue: 0 },
+        );
+      });
+
+      it('목표치를 넘겨도 완료로 찍지 않는다', async () => {
+        // 완료는 클라이언트가 명시적으로 요청할 때만 찍힌다(사용자 확정). 저장 하나가 두
+        // 가지 사실을 동시에 바꾸면, 진행값을 잘못 입력해 목표를 넘겼을 때 완료가 딸려
+        // 오고 되돌리려면 두 번 고쳐야 한다.
+        const progress = await service.saveProgress(USER_ID, 1n, {
+          // 정의의 목표치는 2000이다.
+          progressValue: 9999,
+          performedAt: PERFORMED_AT,
+        });
+
+        expect(progress.isCompleted).toBe(false);
+        expect(progress.completedAt).toBeNull();
+      });
+
+      it('완료 시각을 갱신 대상에 넣지 않는다', async () => {
+        await service.saveProgress(USER_ID, 1n, {
+          progressValue: 300,
+          performedAt: PERFORMED_AT,
+        });
+
+        const [, changes] = histories.upsertForHistoriedOn.mock.calls[0] as [
+          TodoHistorySnapshot,
+          TodoHistoryChanges,
+        ];
+        expect(changes).not.toHaveProperty('completedAt');
+      });
+
+      it('일반 타입이면 BadRequestException이고 저장하지 않는다', async () => {
+        // 일반 할 일은 목표치를 둘 수 없어(`assertShape`) 진행값을 그릴 기준이 없다.
+        // 그 상태는 완료 여부 하나로 표현된다.
+        templates.findById.mockResolvedValue(
+          createTemplate({
+            completeType: 'DAILY',
+            todoType: 'GENERAL',
+            targetValue: null,
+            targetUnit: null,
+          }),
+        );
+
+        await expect(
+          service.saveProgress(USER_ID, 1n, {
+            progressValue: 1,
+            performedAt: PERFORMED_AT,
+          }),
+        ).rejects.toThrow(BadRequestException);
+        expect(histories.upsertForHistoriedOn).not.toHaveBeenCalled();
+      });
+    });
+
+    describe('completeTodo', () => {
+      it('완료 시각을 수행 시각으로 찍는다', async () => {
+        // 날짜 키와 완료 시각이 같은 순간에서 나온다. 두 값을 따로 받으면 8월 2일 기록에
+        // 8월 5일 완료 시각이 들어가는 조합이 만들어진다.
+        const progress = await service.completeTodo(USER_ID, 1n, PERFORMED_AT);
+
+        expect(progress.isCompleted).toBe(true);
+        expect(progress.completedAt).toEqual(PERFORMED_AT);
+        expect(histories.upsertForHistoriedOn).toHaveBeenCalledWith(
+          expect.anything(),
+          { completedAt: PERFORMED_AT },
+        );
+      });
+
+      it('진행값을 갱신 대상에 넣지 않는다', async () => {
+        // `changes`에 담은 것만 갱신되므로(`upsertForHistoriedOn`) 이미 입력한 진행값이
+        // 그대로 남는다.
+        await service.completeTodo(USER_ID, 1n, PERFORMED_AT);
+
+        const [, changes] = histories.upsertForHistoriedOn.mock.calls[0] as [
+          TodoHistorySnapshot,
+          TodoHistoryChanges,
+        ];
+        expect(changes).not.toHaveProperty('progressValue');
+      });
+
+      it('그날 기록이 없어도 만든다', async () => {
+        // 진행값 없이 완료만 찍는 일반 할 일이 정확히 이 경우다. 완료 취소처럼 존재
+        // 확인을 넣으면 그런 할 일을 완료할 수 없게 된다.
+        histories.findByTodoIdAndHistoriedOn.mockResolvedValue(null);
+
+        await service.completeTodo(USER_ID, 1n, PERFORMED_AT);
+
+        expect(histories.upsertForHistoriedOn).toHaveBeenCalled();
+        expect(histories.findByTodoIdAndHistoriedOn).not.toHaveBeenCalled();
+      });
+    });
+
+    describe('uncompleteTodo', () => {
+      it('완료 시각만 비운다', async () => {
+        // 완료된 기록에서 출발한다. 갱신 대상에 진행값이 없으므로 그 값은 남는다.
+        histories.findByTodoIdAndHistoriedOn.mockResolvedValue(
+          createHistory({ completedAt: new Date('2026-08-02T05:00:00.000Z') }),
+        );
+
+        const progress = await service.uncompleteTodo(
+          USER_ID,
+          1n,
+          PERFORMED_AT,
+        );
+
+        expect(progress.isCompleted).toBe(false);
+        expect(histories.upsertForHistoriedOn).toHaveBeenCalledWith(
+          expect.anything(),
+          { completedAt: null },
+        );
+      });
+
+      it('이미 완료가 아닌 기록에 불러도 거절하지 않는다', async () => {
+        // 두 화면에서 취소를 두 번 누르는 것이 정상 조작이다. 기록이 있는지만 보고 완료
+        // 여부는 보지 않는 이유가 이것이다 — 오류로 만들면 사용자가 취소에 실패한 것으로
+        // 읽는다.
+        histories.findByTodoIdAndHistoriedOn.mockResolvedValue(
+          createHistory({ completedAt: null }),
+        );
+
+        const progress = await service.uncompleteTodo(
+          USER_ID,
+          1n,
+          PERFORMED_AT,
+        );
+
+        expect(progress.isCompleted).toBe(false);
+      });
+
+      it('취소할 기록을 그 날짜 키로 찾는다', async () => {
+        await service.uncompleteTodo(USER_ID, 1n, PERFORMED_AT);
+
+        expect(histories.findByTodoIdAndHistoriedOn).toHaveBeenCalledWith(
+          USER_ID,
+          1n,
+          parseLocalDateKey('2026-08-02'),
+        );
+      });
+
+      it('그날 기록이 없으면 저장하지 않고 거절한다', async () => {
+        // `upsertForHistoriedOn`은 행이 없으면 **만든다.** 그대로 부르면 진행값도 완료
+        // 시각도 빈 행이 생겨 "기록이 없다 = 아직 손대지 않았다"가 성립하지 않게 되고,
+        // 손대지 않은 할 일과 구별되지 않는다.
+        histories.findByTodoIdAndHistoriedOn.mockResolvedValue(null);
+
+        await expect(
+          service.uncompleteTodo(USER_ID, 1n, PERFORMED_AT),
+        ).rejects.toThrow(NotFoundException);
+        expect(histories.upsertForHistoriedOn).not.toHaveBeenCalled();
+      });
+
+      it('일회성이면 거절 메시지에 날짜 키를 담지 않는다', async () => {
+        // 일회성의 `historiedOn`은 표시용 날짜가 아니라 중복을 막는 열쇠라서 밖으로
+        // 내보내지 않는다. 뷰 계층은 그 규칙을 **구조로** 막는다 — 이력 항목 변환 함수를
+        // 내보내지 않고 유일한 통로가 매일 반복으로 좁혀진 정의만 받는다(`todo-view.ts`).
+        // **오류 메시지 경로에는 그렇게 막을 접합면이 없다.** 템플릿 문자열 하나라 타입이
+        // 볼 것이 없고, 예외 생성을 헬퍼로 감싸 날짜를 받지 않게 해도 문자열을 직접 쓰는
+        // 경로가 그대로 열려 있어 방어가 아니라 관례가 하나 늘 뿐이다. 그래서 이 테스트가
+        // 그 자리를 맡는다.
+        //
+        // **연도로 찾는 이유는 유출 형태가 셋이기 때문이다.** `formatLocalDateKey`는
+        // `2026-07-20`, `toISOString()`은 `2026-07-20T00:00:00.000Z`, `Date`를 그대로
+        // 템플릿에 넣으면 `Mon Jul 20 2026 …`이 된다. 셋이 공통으로 담는 것이 연도뿐이라
+        // 날짜 문자열 하나만 찾으면 나머지 둘이 빠져나간다.
+        templates.findById.mockResolvedValue(onceTemplate);
+        histories.findByTodoIdAndHistoriedOn.mockResolvedValue(null);
+
+        const thrown = await service
+          .uncompleteTodo(USER_ID, 1n, PERFORMED_AT)
+          .catch((error: Error) => error);
+
+        expect(thrown).toBeInstanceOf(NotFoundException);
+        // 메시지가 비어 있어도 아래 단정이 통과하므로 무엇을 담는지도 함께 고정한다.
+        expect((thrown as Error).message).toContain('todoId=1');
+        expect((thrown as Error).message).not.toContain('2026');
+      });
     });
   });
 });
