@@ -7,6 +7,7 @@ import { parseLocalDateKey } from './todo-local-date';
 import { TodoHistoriesRepository } from './todo-histories.repository';
 import type { TodoTemplateWithHistories } from './todo-templates.repository';
 import { TodoTemplatesRepository } from './todo-templates.repository';
+import type { CreateTodoInput } from './todos.service';
 import { TodosService } from './todos.service';
 
 /**
@@ -72,10 +73,14 @@ describe('TodosService', () => {
     findOnceWithoutCompletedHistory: jest.Mock;
     findDailyActiveOn: jest.Mock;
     findById: jest.Mock;
+    create: jest.Mock;
+    update: jest.Mock;
+    softDelete: jest.Mock;
   };
   let histories: {
     findByTodoIdAndHistoriedOn: jest.Mock;
     findByTodoIdBetween: jest.Mock;
+    upsertForHistoriedOn: jest.Mock;
   };
   let users: { findTimeZone: jest.Mock };
 
@@ -87,10 +92,14 @@ describe('TodosService', () => {
       findOnceWithoutCompletedHistory: jest.fn(),
       findDailyActiveOn: jest.fn(),
       findById: jest.fn(),
+      create: jest.fn(),
+      update: jest.fn(),
+      softDelete: jest.fn(),
     };
     histories = {
       findByTodoIdAndHistoriedOn: jest.fn(),
       findByTodoIdBetween: jest.fn(),
+      upsertForHistoriedOn: jest.fn(),
     };
     users = { findTimeZone: jest.fn().mockResolvedValue(TIME_ZONE) };
 
@@ -525,6 +534,324 @@ describe('TodosService', () => {
 
         expect(histories.findByTodoIdAndHistoriedOn).not.toHaveBeenCalled();
       });
+    });
+  });
+
+  describe('createTodo', () => {
+    /** 검증을 통과하는 최소 입력. 거절을 보는 테스트만 필요한 필드를 덮어쓴다 */
+    function validInput(
+      overrides: Partial<CreateTodoInput> = {},
+    ): CreateTodoInput {
+      return {
+        title: '스쿼트',
+        todoType: 'GENERAL',
+        completeType: 'DAILY',
+        ...overrides,
+      };
+    }
+
+    beforeEach(() => {
+      templates.create.mockImplementation((data: Record<string, unknown>) =>
+        Promise.resolve(createTemplate(data as Partial<TodoTemplate>)),
+      );
+    });
+
+    it('만든 할 일을 돌려주고 progress가 null이다', async () => {
+      // 방금 만들었으므로 기록이 없는 것이 확실하다 — 조회하지 않아도 된다.
+      const item = await service.createTodo(USER_ID, validInput());
+
+      expect(item.progress).toBeNull();
+      expect(item.todoId).toBe(1n);
+    });
+
+    it('소유자를 넣어 만든다', async () => {
+      await service.createTodo(USER_ID, validInput());
+
+      expect(templates.create).toHaveBeenCalledWith(
+        expect.objectContaining({ userId: USER_ID }),
+      );
+    });
+
+    it('활성 기간을 UTC 자정 Date로 바꿔 넘긴다', async () => {
+      // 손으로 만든 `Date`는 한국 시간대에서 하루 앞으로 밀려 저장된다.
+      await service.createTodo(
+        USER_ID,
+        validInput({ activeFrom: '2026-08-01', activeUntil: '2026-12-31' }),
+      );
+
+      expect(templates.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          activeFrom: parseLocalDateKey('2026-08-01'),
+          activeUntil: parseLocalDateKey('2026-12-31'),
+        }),
+      );
+    });
+
+    it.each(['NUMERIC', 'STEPS'] as const)(
+      '%s에 목표치가 없으면 BadRequestException이다',
+      async (todoType) => {
+        // 목표치가 없으면 무엇을 채워야 완료인지 알 수 없다.
+        await expect(
+          service.createTodo(USER_ID, validInput({ todoType })),
+        ).rejects.toThrow(BadRequestException);
+      },
+    );
+
+    it('일반 타입에 목표치를 주면 거절한다', async () => {
+      // 체크만 하는 할 일이다. 목표치가 있으면 화면이 진행률을 그리려 한다.
+      await expect(
+        service.createTodo(
+          USER_ID,
+          validInput({ todoType: 'GENERAL', targetValue: 100 }),
+        ),
+      ).rejects.toThrow(BadRequestException);
+    });
+
+    it('일반 타입에 목표 단위만 주어도 거절한다', async () => {
+      // 목표치 한 쌍이므로 한쪽만 있는 상태도 만들지 않는다.
+      await expect(
+        service.createTodo(
+          USER_ID,
+          validInput({ todoType: 'GENERAL', targetUnit: '회' }),
+        ),
+      ).rejects.toThrow(BadRequestException);
+    });
+
+    it('일회성에 활성 기간을 주면 거절한다', async () => {
+      // 활성 기간은 매일 반복이 그날 목록에 나올지를 정하는 값이다. 일회성 목록은
+      // 날짜로 거르지 않으므로 저장해도 아무것도 하지 않는다.
+      await expect(
+        service.createTodo(
+          USER_ID,
+          validInput({ completeType: 'ONCE', activeFrom: '2026-08-01' }),
+        ),
+      ).rejects.toThrow(BadRequestException);
+    });
+
+    it('매일 반복에 예정일을 주면 거절한다', async () => {
+      // 예정일은 일회성을 언제까지 해야 하는지다. 매일 반복에는 뜻이 없다.
+      await expect(
+        service.createTodo(
+          USER_ID,
+          validInput({
+            completeType: 'DAILY',
+            shouldDoAt: new Date('2026-08-10T00:00:00.000Z'),
+          }),
+        ),
+      ).rejects.toThrow(BadRequestException);
+    });
+
+    it('활성 시작일이 종료일보다 늦으면 거절한다', async () => {
+      await expect(
+        service.createTodo(
+          USER_ID,
+          validInput({ activeFrom: '2026-12-31', activeUntil: '2026-08-01' }),
+        ),
+      ).rejects.toThrow(BadRequestException);
+    });
+
+    it('활성 기간 날짜 형식이 어긋나면 거절한다', async () => {
+      await expect(
+        service.createTodo(USER_ID, validInput({ activeFrom: '2026-8-1' })),
+      ).rejects.toThrow(BadRequestException);
+    });
+
+    // 활성 기간도 **양 끝을 각각** 단정한다. 기간 범위 쪽과 같은 근거다 — 응답이 어느
+    // 값이 문제인지 알려 주는 것이 자리 이름을 인자로 받는 목적이고, 두 이름을 뒤바꿔
+    // 넘기면 사용자가 엉뚱한 필드를 고치려 한다. 종류만 단정하면 그 변경이 통과한다.
+    it('활성 시작일이 잘못되면 그 자리를 알려 준다', async () => {
+      const thrown = await service
+        .createTodo(USER_ID, validInput({ activeFrom: '엉터리' }))
+        .catch((error: Error) => error);
+
+      expect(thrown).toBeInstanceOf(BadRequestException);
+      expect((thrown as Error).message).toContain('활성 시작일');
+      expect((thrown as Error).message).not.toContain('종료일');
+    });
+
+    it('활성 종료일이 잘못되면 그 자리를 알려 준다', async () => {
+      const thrown = await service
+        .createTodo(USER_ID, validInput({ activeUntil: '엉터리' }))
+        .catch((error: Error) => error);
+
+      expect(thrown).toBeInstanceOf(BadRequestException);
+      expect((thrown as Error).message).toContain('활성 종료일');
+      expect((thrown as Error).message).not.toContain('시작일');
+    });
+
+    it('거절하면 만들지 않는다', async () => {
+      await expect(
+        service.createTodo(USER_ID, validInput({ todoType: 'NUMERIC' })),
+      ).rejects.toThrow(BadRequestException);
+      expect(templates.create).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('updateTodo', () => {
+    it('남의 할 일이면 NotFoundException이다', async () => {
+      // `findById`가 소유자를 조건에 넣으므로 `null`로 돌아온다. 먼저 읽는 덕분에
+      // Prisma의 `P2025`(고칠 행을 찾지 못했다)가 500으로 새지 않는다.
+      templates.findById.mockResolvedValue(null);
+
+      await expect(
+        service.updateTodo(USER_ID, 1n, { title: '가로챈 제목' }),
+      ).rejects.toThrow(NotFoundException);
+      expect(templates.update).not.toHaveBeenCalled();
+    });
+
+    it('소유자를 조건으로 고친다', async () => {
+      templates.findById.mockResolvedValue(createTemplate());
+      templates.update.mockResolvedValue(createTemplate({ title: '바꾼 뒤' }));
+
+      await service.updateTodo(USER_ID, 1n, { title: '바꾼 뒤' });
+
+      expect(templates.update).toHaveBeenCalledWith(
+        USER_ID,
+        1n,
+        expect.objectContaining({ title: '바꾼 뒤' }),
+      );
+    });
+
+    it('저장된 타입으로 검증한다', async () => {
+      // 숫자형으로 만든 할 일의 목표치를 비우면 무엇을 채워야 완료인지 알 수 없게 된다.
+      // 입력에 `todoType`이 없으므로 **저장된 값**을 봐야 이 거절이 성립한다.
+      templates.findById.mockResolvedValue(
+        createTemplate({
+          todoType: 'NUMERIC',
+          targetValue: new Prisma.Decimal('100'),
+          targetUnit: '회',
+        }),
+      );
+
+      await expect(
+        service.updateTodo(USER_ID, 1n, { targetValue: null }),
+      ).rejects.toThrow(BadRequestException);
+    });
+
+    it('주지 않은 필드는 저장된 값으로 판단한다', async () => {
+      // 숫자형이고 목표치가 이미 있으므로 제목만 바꾸는 요청이 통과해야 한다.
+      templates.findById.mockResolvedValue(
+        createTemplate({
+          todoType: 'NUMERIC',
+          targetValue: new Prisma.Decimal('100'),
+          targetUnit: '회',
+        }),
+      );
+      templates.update.mockResolvedValue(createTemplate());
+
+      await service.updateTodo(USER_ID, 1n, { title: '제목만' });
+
+      expect(templates.update).toHaveBeenCalledWith(USER_ID, 1n, {
+        title: '제목만',
+      });
+    });
+
+    it('저장된 반복 방식으로도 검증한다', async () => {
+      // 매일 반복으로 만든 할 일에 예정일을 붙이는 요청이다.
+      templates.findById.mockResolvedValue(
+        createTemplate({ completeType: 'DAILY' }),
+      );
+
+      await expect(
+        service.updateTodo(USER_ID, 1n, {
+          shouldDoAt: new Date('2026-08-10T00:00:00.000Z'),
+        }),
+      ).rejects.toThrow(BadRequestException);
+    });
+
+    it('활성 기간을 UTC 자정 Date로 바꿔 넘긴다', async () => {
+      templates.findById.mockResolvedValue(
+        createTemplate({ completeType: 'DAILY' }),
+      );
+      templates.update.mockResolvedValue(createTemplate());
+
+      await service.updateTodo(USER_ID, 1n, { activeUntil: '2026-12-31' });
+
+      expect(templates.update).toHaveBeenCalledWith(USER_ID, 1n, {
+        activeUntil: parseLocalDateKey('2026-12-31'),
+      });
+    });
+
+    it('활성 기간을 비우는 것은 허용한다', async () => {
+      // `null`은 "제한 없음"이라는 뜻이고 매일 반복에서 정상적인 값이다.
+      templates.findById.mockResolvedValue(
+        createTemplate({ completeType: 'DAILY' }),
+      );
+      templates.update.mockResolvedValue(createTemplate());
+
+      await service.updateTodo(USER_ID, 1n, { activeUntil: null });
+
+      expect(templates.update).toHaveBeenCalledWith(USER_ID, 1n, {
+        activeUntil: null,
+      });
+    });
+
+    it('읽은 뒤 지워졌으면 NotFoundException이다', async () => {
+      // 미리 읽어도 읽기와 고치기 사이에 삭제가 끼어들 수 있다. 그때 대상이 사라져
+      // Prisma가 `P2025`(고칠 행을 찾지 못했다)를 던지는데, 그대로 새게 두면
+      // 클라이언트에게 500으로 보여 서버 장애처럼 읽힌다.
+      templates.findById.mockResolvedValue(createTemplate());
+      templates.update.mockRejectedValue(
+        new Prisma.PrismaClientKnownRequestError('고칠 행을 찾지 못했다', {
+          code: 'P2025',
+          clientVersion: 'test',
+        }),
+      );
+
+      await expect(
+        service.updateTodo(USER_ID, 1n, { title: '바꾼 뒤' }),
+      ).rejects.toThrow(NotFoundException);
+    });
+
+    it('다른 Prisma 오류는 그대로 던진다', async () => {
+      // 오류 코드를 가리지 않고 404로 바꾸면 진짜 장애가 "없는 할 일"로 위장하고,
+      // 원인을 찾을 단서가 사라진다.
+      const conflict = new Prisma.PrismaClientKnownRequestError(
+        '고유 제약을 위반했다',
+        { code: 'P2002', clientVersion: 'test' },
+      );
+      templates.findById.mockResolvedValue(createTemplate());
+      templates.update.mockRejectedValue(conflict);
+
+      await expect(
+        service.updateTodo(USER_ID, 1n, { title: '바꾼 뒤' }),
+      ).rejects.toBe(conflict);
+    });
+  });
+
+  describe('deleteTodo', () => {
+    it('남의 할 일이면 NotFoundException이다', async () => {
+      templates.findById.mockResolvedValue(null);
+
+      await expect(service.deleteTodo(USER_ID, 1n)).rejects.toThrow(
+        NotFoundException,
+      );
+      expect(templates.softDelete).not.toHaveBeenCalled();
+    });
+
+    it('소유자를 조건으로 지운다', async () => {
+      templates.findById.mockResolvedValue(createTemplate());
+      templates.softDelete.mockResolvedValue(createTemplate());
+
+      await service.deleteTodo(USER_ID, 1n);
+
+      expect(templates.softDelete).toHaveBeenCalledWith(USER_ID, 1n);
+    });
+
+    it('읽은 뒤 지워졌으면 NotFoundException이다', async () => {
+      // 두 화면에서 같은 할 일을 지우면 두 번째 요청이 이 경로로 온다. 삭제는 트랜잭션의
+      // 첫 연산이 정의 수정이라 대상을 찾지 못하는 순간 `P2025`로 실패한다.
+      templates.findById.mockResolvedValue(createTemplate());
+      templates.softDelete.mockRejectedValue(
+        new Prisma.PrismaClientKnownRequestError('고칠 행을 찾지 못했다', {
+          code: 'P2025',
+          clientVersion: 'test',
+        }),
+      );
+
+      await expect(service.deleteTodo(USER_ID, 1n)).rejects.toThrow(
+        NotFoundException,
+      );
     });
   });
 });
