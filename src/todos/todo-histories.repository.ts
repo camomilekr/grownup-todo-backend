@@ -69,6 +69,11 @@ export type TodoHistoryChanges = {
  * 찍히는 경로는 **할 일 자체가 지워질 때 하나뿐**이고, 그것은
  * `TodoTemplatesRepository.softDelete`가 한 트랜잭션에서 처리한다.
  *
+ * **이 클래스만으로는 그 금지가 성립하지 않는다.** 정의 쪽 입력 타입 둘
+ * (`CreateTodoTemplateInput`·`UpdateTodoTemplateInput`)이 완료 기록으로 이어지는 중첩
+ * 관계 경로를 `Omit`으로 빼야 나머지 절반이 막힌다 — 그 경로가 열려 있으면 정의를
+ * 고치는 `update` 하나로 기록을 행째로 지울 수 있다.
+ *
  * **완료를 취소하는 것은 삭제가 아니다.** `completedAt`을 비우는 수정이고 행은 그대로
  * 남는다.
  *

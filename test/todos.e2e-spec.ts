@@ -148,7 +148,7 @@ describe('Todos Repository (e2e)', () => {
       //
       // `@ts-expect-error`는 "바로 다음 줄에 타입 오류가 있을 것"이라고 선언하는
       // 주석이다. 오류가 **없으면** TypeScript가 거꾸로 "쓸데없는 지시자다"라며
-      // `Unused '@ts-expect-error' directive` 오류를 낸다. 즉 아래 네 줄은 각각
+      // `Unused '@ts-expect-error' directive` 오류를 낸다. 즉 아래 여섯 줄은 각각
       // "이 코드는 타입 오류여야 한다"는 뜻이고, 누군가 금지를 풀면 그 순간
       // `npm run verify`가 깨진다.
       //
@@ -189,6 +189,22 @@ describe('Todos Repository (e2e)', () => {
           },
           {},
         );
+
+        // 아래 둘은 완료 기록으로 이어지는 **중첩 관계 경로**다. 정의를 다루는
+        // 두 메서드의 입력에 이 필드가 남아 있으면 기록의 저장 통로
+        // (`upsertForHistoriedOn`)와 개별 삭제 금지가 통째로 우회된다 — 갱신
+        // 쪽 중첩 입력에는 행을 실제로 지우는 `deleteMany`가 들어 있어서,
+        // 지울 수 없어야 하는 기록이 삭제 표시도 남기지 않고 사라진다.
+        await templates.create({
+          userId,
+          title: '기록을 함께 만드는 todo',
+          todoType: 'GENERAL',
+          completeType: 'DAILY',
+          // @ts-expect-error 완료 기록은 정의를 만드는 경로로 함께 만들 수 없다
+          histories: { create: [] },
+        });
+        // @ts-expect-error 완료 기록은 정의를 고치는 경로로 지울 수 없다
+        await templates.update(userId, 1n, { histories: { deleteMany: {} } });
       };
 
       expect(typeGuard).toBeInstanceOf(Function);

@@ -545,6 +545,8 @@ findDailyActiveOn(userId: bigint, historiedOn: Date): Promise<TodoTemplateWithHi
 
 **완료 기록은 개별적으로 지울 수 없다**(사용자 확정). 그래서 개별 삭제 메서드를 두지 않았다 — 문서로 경고하는 대신 없는 메서드는 부를 수 없게 했다. `deletedAt`이 찍히는 경로는 **할 일 자체가 지워질 때 하나뿐**이고 그것은 `TodoTemplatesRepository.softDelete`가 한 트랜잭션에서 처리한다.
 
+**메서드가 없는 것만으로는 그 금지가 성립하지 않는다.** 정의 쪽 입력 타입 둘이 완료 기록으로 이어지는 중첩 관계 경로를 함께 막아야 하고, 그 근거는 [CreateTodoTemplateInput](#createtodotemplateinput)과 [UpdateTodoTemplateInput](#updatetodotemplateinput)에 있다.
+
 **완료를 취소하는 것은 삭제가 아니다.** `completedAt`을 비우는 수정이고 행은 그대로 남는다.
 
 **조회 셋은 기록 자체의 삭제 표시와 할 일의 삭제 표시를 둘 다 본다.** 할 일을 지울 때 그 시점의 기록에 삭제 표시를 찍지만 그것은 지우는 순간에 있던 기록만 덮으므로, 저장 거절과 삭제가 겹치는 좁은 시간차로 그 뒤에 만들어진 기록에는 표시가 없다.
@@ -754,7 +756,10 @@ findTimeZone(userId: bigint): Promise<string | null>
 
 #### CreateTodoTemplateInput
 
-`TodoTemplatesRepository.create`가 받는다. Prisma가 만든 삽입 입력 타입에서 `todoId`·`createdAt`·`updatedAt`·`deletedAt` 넷을 뺀 것이다 — 번호와 시각 컬럼은 데이터베이스가 채운다.
+`TodoTemplatesRepository.create`가 받는다. Prisma가 만든 삽입 입력 타입에서 다섯을 뺀 것이다.
+
+- `todoId`·`createdAt`·`updatedAt`·`deletedAt` — 번호와 시각 컬럼은 데이터베이스가 채운다
+- `histories` — 완료 기록으로 이어지는 **중첩 관계 삽입 입력**이다. 남겨 두면 이 경로로 기록을 함께 삽입할 수 있고, 그러면 날짜 키를 만드는 유일한 통로(`toHistoriedOn`)와 저장 통로(`upsertForHistoriedOn`)를 둘 다 지나지 않는 기록이 생긴다
 
 | 이름           | 타입                                                       | required | 설명                                                                    |
 | -------------- | ---------------------------------------------------------- | -------- | ----------------------------------------------------------------------- |
@@ -769,16 +774,16 @@ findTimeZone(userId: bigint): Promise<string | null>
 | `targetUnit`   | `string \| null`                                          | 아니오   | 목표치의 단위                                                           |
 | `activeFrom`   | `Date \| string \| null`                                  | 아니오   | 활성 시작일. **`parseLocalDateKey`로 만든 UTC 자정 `Date`를 넘긴다**    |
 | `activeUntil`  | `Date \| string \| null`                                  | 아니오   | 활성 종료일                                                             |
-| `histories`    | 중첩 관계 삽입 입력                                        | 아니오   | 완료 기록을 함께 만드는 자리. **`Omit`으로 뺀 넷에 들어 있지 않아 타입에 남아 있고, Service는 채우지 않는다** |
 
 #### UpdateTodoTemplateInput
 
-`TodoTemplatesRepository.update`가 받는다. Prisma가 만든 갱신 입력 타입에서 일곱을 뺀 것이고, 각 필드는 값을 직접 주는 형태와 Prisma의 갱신 연산 객체를 주는 형태를 모두 받는다.
+`TodoTemplatesRepository.update`가 받는다. Prisma가 만든 갱신 입력 타입에서 여덟을 뺀 것이고, 각 필드는 값을 직접 주는 형태와 Prisma의 갱신 연산 객체를 주는 형태를 모두 받는다.
 
-**뺀 것과 그 이유가 셋으로 갈린다.**
+**뺀 것과 그 이유가 넷으로 갈린다.**
 
 - `todoType`·`completeType` — **만든 뒤 바꿀 수 없다.** 두 값 모두 완료 기록에 저장되지 않아서 이미 쌓인 기록을 해석하는 근거가 이 정의 하나뿐이다. 종류를 바꾸면 지나간 기록이 전부 새 종류로 다시 해석되고, 반복 방식을 바꾸면 이미 쌓인 날짜가 무슨 의미였는지 알아낼 방법이 없어진다
 - `userId` — 소유자를 옮기는 것은 이 계층이 할 일이 아니다
+- `histories` — 완료 기록으로 이어지는 **중첩 관계 갱신 입력**이고, 이쪽이 가장 위험하다. 그 중첩 입력에는 `deleteMany`가 들어 있어서, 개별적으로 지울 수 없어야 하는 완료 기록이 **삭제 표시(`deletedAt`)조차 남기지 않고 행째로 사라진다**
 - `todoId`·`createdAt`·`updatedAt`·`deletedAt` — 번호와 시각 컬럼이다
 
 | 이름          | 타입                          | required | 설명                          |
@@ -791,9 +796,8 @@ findTimeZone(userId: bigint): Promise<string | null>
 | `targetUnit`  | `string \| null` 또는 갱신 연산 객체 | 아니오 | 목표치의 단위              |
 | `activeFrom`  | `Date \| string \| null` 또는 갱신 연산 객체 | 아니오 | 활성 시작일     |
 | `activeUntil` | `Date \| string \| null` 또는 갱신 연산 객체 | 아니오 | 활성 종료일     |
-| `histories`   | 중첩 관계 갱신 입력            | 아니오   | 완료 기록을 함께 바꾸는 자리. **`Omit`으로 뺀 일곱에 들어 있지 않아 타입에 남아 있고, Service는 채우지 않는다** |
 
-**두 값을 못 바꾸게 하는 것은 데이터베이스 제약이 아니라 TypeScript 타입이다.** 이 `Omit`이 사라지면 컴파일만 실패하고 데이터베이스는 조용히 허용한다 — `test/todos.e2e-spec.ts`가 그 컴파일 오류의 존재를 붙잡아 둔다.
+**막는 것은 데이터베이스 제약이 아니라 TypeScript 타입이다.** 위 두 입력 타입의 `Omit`이 사라지면 컴파일만 실패하고 데이터베이스는 조용히 허용한다 — `test/todos.e2e-spec.ts`가 네 가지 금지(`todoType`·`completeType`·중첩 삽입·중첩 삭제)의 컴파일 오류가 실제로 나는지를 붙잡아 둔다.
 
 #### TodoHistorySnapshot
 

@@ -2,10 +2,19 @@ import { Injectable } from '@nestjs/common';
 import type { Prisma, TodoTemplate } from '../generated/prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 
-/** 할 일을 새로 만들 때 받는 값. 번호와 시각 컬럼은 DB가 채운다. */
+/**
+ * 할 일을 새로 만들 때 받는 값. 번호와 시각 컬럼은 DB가 채운다.
+ *
+ * **완료 기록으로 이어지는 중첩 관계 입력(`histories`)도 뺐다.** 남겨 두면 정의를
+ * 만드는 이 경로로 기록을 함께 삽입할 수 있고, 그러면 날짜 키를 만드는 유일한
+ * 통로(`toHistoriedOn`)와 저장 통로(`upsertForHistoriedOn`)를 둘 다 지나지 않는
+ * 기록이 생긴다. 일회성 할 일에서 특히 나쁘다 — 그 날짜 키는 중복을 막는
+ * 열쇠이고, 다른 값이 들어가면 기록이 둘 생겨 목록에 어느 것이 잡히는지 정해지지
+ * 않는다.
+ */
 export type CreateTodoTemplateInput = Omit<
   Prisma.TodoTemplateUncheckedCreateInput,
-  'todoId' | 'createdAt' | 'updatedAt' | 'deletedAt'
+  'todoId' | 'createdAt' | 'updatedAt' | 'deletedAt' | 'histories'
 >;
 
 /**
@@ -28,6 +37,11 @@ export type CreateTodoTemplateInput = Omit<
  *
  * `userId`도 뺐다. 소유자를 옮기는 것은 이 계층이 할 일이 아니다.
  *
+ * **완료 기록으로 이어지는 중첩 관계 입력(`histories`)도 뺐다.** 이쪽이 가장 위험하다 —
+ * 그 중첩 입력에는 `deleteMany`가 들어 있어서, **개별적으로 지울 수 없어야 하는 완료
+ * 기록이 삭제 표시(`deletedAt`)조차 남기지 않고 행째로 사라진다.** 기록을 지우는 개별
+ * 메서드를 두지 않은 것만으로는 그 금지가 성립하지 않았다.
+ *
  * 막는 것은 DB 제약이 아니라 TypeScript 타입이다. 그래서 이 `Omit`이 사라지면 컴파일만
  * 실패하고 DB는 조용히 허용한다 — `test/todos.e2e-spec.ts`가 그 컴파일 오류의 존재를
  * 붙잡아 둔다.
@@ -41,6 +55,7 @@ export type UpdateTodoTemplateInput = Omit<
   | 'createdAt'
   | 'updatedAt'
   | 'deletedAt'
+  | 'histories'
 >;
 
 /**
