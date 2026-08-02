@@ -154,6 +154,56 @@ export function parseLocalDateKey(isoDate: string): Date {
   return key;
 }
 
+/** 하루의 밀리초. UTC 자정인지를 나머지 연산으로 판별하는 데 쓴다 */
+const MILLISECONDS_PER_DAY = 86_400_000;
+
+/**
+ * 그 `Date`가 **날짜 컬럼(`@db.Date`)에 넣어도 되는 값인지** 확인한다. 어긋나면 던지고
+ * 맞으면 아무것도 하지 않는다.
+ *
+ * **이 검사가 필요한 이유는 어긋난 값이 조용히 저장되기 때문이다.** 어댑터가 `@db.Date`
+ * 컬럼에 넘길 값을 `getUTCFullYear`/`getUTCMonth`/`getUTCDate`로 직렬화하므로, UTC 자정이
+ * 아닌 `Date`를 넘기면 시각 부분이 잘려 나가면서 날짜가 어긋난다 — 한국 시간대에서
+ * `new Date(2026, 7, 1)`은 `2026-07-31T15:00:00.000Z`이고 저장되는 값은 `2026-07-31`이다.
+ * **예외가 하나도 나지 않아** 매일 반복 할 일이 하루 일찍 활성화되고 어떤 테스트도
+ * 잡지 못한다.
+ *
+ * 시각 컬럼(`Timestamptz`)인 `completedAt`·`shouldDoAt`을 실수로 넘기는 경우도 같은
+ * 검사에 걸린다. 그쪽은 UTC 기준 날짜가 나오는데 그 값이 유저 타임존 기준 날짜와
+ * 어긋나서, 한국 시간대 오전에 완료한 기록은 맞아 보이다가 **저녁에 완료한 기록에서만
+ * 하루 어긋난다.**
+ *
+ * **값이 없는 경우도 `RangeError`로 거절한다.** `tsconfig.json`이
+ * `strictNullChecks: false`라 `undefined`를 넘기는 호출을 컴파일러가 막지 못하는데,
+ * 그대로 두면 `undefined.getTime()`이 `TypeError`가 된다. **어긋난 입력을 오류 종류
+ * 하나로 모으는 것**이 이 검사의 값어치다 — `Cannot read properties of undefined
+ * (reading 'getTime')`은 무엇을 잘못 넘겼는지 말해 주지 않고, 이 함수를 잡지 않는
+ * 경로(`formatLocalDateKey`)에서는 그 문구가 그대로 500 응답의 원인 기록이 된다.
+ *
+ * @throws {RangeError} 값이 없거나, 유효하지 않은 `Date`거나, UTC 자정이 아닐 때
+ */
+export function assertLocalDateKey(dateKey: Date): void {
+  if (dateKey == null) {
+    throw new RangeError(
+      'assertLocalDateKey: 날짜가 없다 (null 또는 undefined)',
+    );
+  }
+
+  if (Number.isNaN(dateKey.getTime())) {
+    throw new RangeError(
+      'assertLocalDateKey: 유효하지 않은 Date가 넘어왔다 (Invalid Date)',
+    );
+  }
+
+  if (dateKey.getTime() % MILLISECONDS_PER_DAY !== 0) {
+    throw new RangeError(
+      `assertLocalDateKey: UTC 자정이 아닌 Date다 (${dateKey.toISOString()}). ` +
+        '시각에서 날짜를 뽑으려면 toLocalDateKey를, 사용자가 고른 날짜 문자열이라면 ' +
+        'parseLocalDateKey를 거쳐라',
+    );
+  }
+}
+
 /**
  * 날짜 키(`UTC 자정 Date`)를 `"2026-08-01"` 형식 문자열로 바꾼다. `parseLocalDateKey`의
  * 반대 방향이고, **`@db.Date` 컬럼에서 읽은 값을 밖으로 내보낼 때 쓴다.**
@@ -170,23 +220,9 @@ export function parseLocalDateKey(isoDate: string): Date {
  * @throws {RangeError} `dateKey`가 유효하지 않거나 UTC 자정이 아닐 때
  */
 export function formatLocalDateKey(dateKey: Date): string {
-  if (Number.isNaN(dateKey.getTime())) {
-    throw new RangeError(
-      'formatLocalDateKey: 유효하지 않은 Date가 넘어왔다 (Invalid Date)',
-    );
-  }
-
-  // UTC 자정이 아닌 값을 거절한다. 시각 컬럼(`Timestamptz`)인 `completedAt`이나
-  // `shouldDoAt`을 실수로 넘기면 UTC 기준 날짜가 나오는데, 그 값은 유저 타임존 기준
-  // 날짜와 어긋난다 — KST 오전 9시에 완료한 기록이 UTC로는 자정 직후라 날짜가
-  // 같아 보이다가, 저녁에 완료한 기록에서만 하루 어긋난다. 시각에서 날짜를 뽑아야
-  // 한다면 `toLocalDateKey`를 먼저 거쳐야 한다.
-  if (dateKey.getTime() % 86_400_000 !== 0) {
-    throw new RangeError(
-      `formatLocalDateKey: UTC 자정이 아닌 Date다 (${dateKey.toISOString()}). ` +
-        '시각에서 날짜를 뽑으려면 toLocalDateKey를 먼저 거쳐라',
-    );
-  }
+  // 검사를 `assertLocalDateKey`에 맡긴다. 같은 규칙을 `Date`를 인자로 받는 자리도
+  // 걸어야 하는데, 두 곳에 두면 한쪽만 고쳐지는 날이 온다.
+  assertLocalDateKey(dateKey);
 
   return dateKey.toISOString().slice(0, 10);
 }

@@ -1,4 +1,5 @@
 import {
+  assertLocalDateKey,
   formatLocalDateKey,
   parseLocalDateKey,
   toHistoriedOn,
@@ -275,6 +276,60 @@ describe('parseLocalDateKey', () => {
 
   it('평년 2월 29일은 던진다', () => {
     expect(() => parseLocalDateKey('2026-02-29')).toThrow(RangeError);
+  });
+});
+
+describe('assertLocalDateKey', () => {
+  // 날짜 컬럼(`@db.Date`)에 넣을 값이 UTC 자정인지 확인하는 검사다. `formatLocalDateKey`
+  // 안에만 있던 것을 밖으로 빼냈다 — `Date`를 인자로 받는 자리(활성 기간, 이력 조회
+  // 범위)가 같은 검사를 걸어야 하기 때문이다.
+  it('UTC 자정 Date는 통과한다', () => {
+    expect(() =>
+      assertLocalDateKey(new Date('2026-08-01T00:00:00.000Z')),
+    ).not.toThrow();
+  });
+
+  it('시각이 섞인 Date는 던진다', () => {
+    // 시각 컬럼(`Timestamptz`)인 `completedAt`이나 `shouldDoAt`을 실수로 넘기는 경우다.
+    // 그대로 두면 UTC 기준 날짜가 나오는데 그 값은 유저 타임존 기준 날짜와 어긋난다.
+    expect(() =>
+      assertLocalDateKey(new Date('2026-08-01T09:00:00.000Z')),
+    ).toThrow(RangeError);
+  });
+
+  it('유효하지 않은 Date는 그렇다고 알려 주며 던진다', () => {
+    // **오류 종류만 단정하면 이 검사를 지워도 통과한다.** Invalid Date의 `getTime()`은
+    // `NaN`이라 아래 UTC 자정 검사에 걸리고, 그 분기가 메시지를 만들며 부르는
+    // `toISOString()`이 `RangeError: Invalid time value`를 던지기 때문이다. 종류가 같아
+    // 구별되지 않으므로 **원인을 말해 주는 문구까지** 본다. 문구 전체가 아니라 'Invalid
+    // Date'만 보는 것은 다듬을 때마다 깨지지 않게 하려는 것이다.
+    expect(() => assertLocalDateKey(new Date('쓰레기'))).toThrow(
+      /Invalid Date/,
+    );
+  });
+
+  it('값이 없으면 던진다', () => {
+    // `tsconfig.json`이 `strictNullChecks: false`라 컴파일러가 이 호출을 막지 못한다.
+    // 그냥 두면 `undefined.getTime()`이 `TypeError`가 되는데, 그 문구는 무엇을 잘못
+    // 넘겼는지 말해 주지 않는다. **어긋난 입력을 오류 종류 하나로 모으는 것**이 이
+    // 분기가 지키는 것이다. 위 Invalid Date 테스트와 달리 여기서는 종류만 단정해도
+    // 되는데, 분기를 지우면 나오는 것이 `RangeError`가 아니라 `TypeError`여서다.
+    expect(() => assertLocalDateKey(undefined)).toThrow(RangeError);
+  });
+
+  it('로컬 타임존 자정으로 만든 Date는 던진다', () => {
+    // 한국 시간대(UTC+9)에서 `new Date(2026, 7, 1)`이 만들어 내는 값이다. 그 식을 그대로
+    // 쓰지 않는 이유는 값이 **실행 환경의 타임존에 따라 달라지기** 때문이다 — 이 저장소는
+    // jest에 타임존을 고정하지 않아서, UTC로 설정된 기계에서는 그 식이 진짜 UTC 자정이
+    // 되어 거절되지 않는다. 그러면 이 테스트가 통과하면서 아무것도 지키지 못한다.
+    //
+    // 이 값이 `@db.Date` 컬럼에 들어가면 어댑터가 UTC 컴포넌트를 쓰므로 `2026-07-31`로
+    // 저장되고, **예외가 하나도 나지 않아** 매일 반복 할 일이 하루 일찍 활성화된다.
+    const KST_OFFSET_MS = 9 * 60 * 60 * 1000;
+
+    expect(() =>
+      assertLocalDateKey(new Date(Date.UTC(2026, 7, 1) - KST_OFFSET_MS)),
+    ).toThrow(RangeError);
   });
 });
 
