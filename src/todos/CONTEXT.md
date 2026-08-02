@@ -1,6 +1,6 @@
 # CONTEXT
 
-> 마지막 업데이트: 2026-08-01
+> 마지막 업데이트: 2026-08-02
 
 ## 역할
 
@@ -22,8 +22,8 @@
 
 | 파일명 | 역할 |
 |--------|------|
-| `todo-local-date.ts` | 날짜 컬럼에 넣을 값을 만드는 함수 넷. **이 폴더 밖에서 `Date`를 직접 만들지 않게 하는 것이 목적이다** |
-| `todo-local-date.spec.ts` | 자정 경계, 일회성 키의 불변성, 날짜 문자열 검증 |
+| `todo-local-date.ts` | 날짜 컬럼에 넣을 값을 만드는 함수 넷과 **그 값이 맞는지 확인하는 함수 하나** |
+| `todo-local-date.spec.ts` | 자정 경계, 일회성 키의 불변성, 날짜 문자열 검증, 잘못 만든 `Date` 거절 |
 | `todo-view.ts` | 저장된 행을 밖으로 내보낼 형태로 바꾸는 순수 함수와 그 타입 |
 | `todo-view.spec.ts` | `null`과 `0`의 구별, `Decimal` 변환, 반복 방식별 상세 형태 |
 | `todo-templates.repository.ts` | 할 일 정의 접근. 만들기·읽기·고치기·삭제 + 목록 조회 두 가지 |
@@ -138,20 +138,38 @@
 
 ## 날짜 계산
 
-날짜를 만드는 함수가 넷이고 쓰임이 다르다. 앞 셋은 `Date`를 만들고 마지막 하나는 반대 방향으로 문자열을 만든다.
+함수가 다섯이고 쓰임이 다르다. 셋은 `Date`를 만들고, 하나는 반대 방향으로 문자열을 만들고, 나머지 하나는 **만들지 않고 확인만 한다.**
 
 | 함수 | 언제 쓰는가 | 대상 |
 |---|---|---|
 | `toHistoriedOn({ completeType, createdAt, performedAt, timeZone })` | **완료 기록 날짜를 만드는 유일한 통로** | `todo_history.historied_on` |
 | `toLocalDateKey(instant, tz)` | 조회에 넘길 "오늘"을 계산할 때 | `findDailyActiveOn`의 인자 |
 | `parseLocalDateKey('2026-08-01')` | 사용자가 **고른 날짜**를 받을 때 | `active_from`, `active_until` |
+| `assertLocalDateKey(dateKey)` | **받은 `Date`가 날짜 컬럼에 넣어도 되는 값인지** 볼 때 | Service의 활성 기간·이력 조회 범위 |
 | `formatLocalDateKey(dateKey)` | 날짜 컬럼에서 읽은 값을 **밖으로 내보낼 때** | 응답의 `activeFrom`·`activeUntil`·`historiedOn` |
+
+### Service는 날짜를 `Date`로 받고, 그 값을 만드는 것은 부르는 쪽이다
+
+`CreateTodoInput`·`UpdateTodoInput`의 활성 기간과 `TodoHistoryRange`의 범위가 전부 `Date`다. **이 값을 만드는 것은 부르는 쪽의 책임이고, 값을 받는 경계 계층(Controller)이 이 저장소에 아직 없다** — 그래서 지금 그 책임은 `TodosService`를 부르는 코드 전부에 있다.
+
+**사용자가 고른 날짜 문자열에서 만든다면 반드시 `parseLocalDateKey`를 거쳐야 한다.** 잃는 것과 지키는 것이 다르기 때문이다.
+
+- **UTC 자정인지는 Service가 확인한다.** 네 자리 각각에서 `assertLocalDateKey`를 걸어 `BadRequestException`으로 거절한다. 한국 시간대에서 `new Date(2026, 7, 1)`을 넘기는 실수가 여기서 걸린다
+- **달력 검증(`2026-02-30` 거절)은 Service가 할 수 없다.** `Date.UTC(2026, 1, 30)`이 조용히 3월 2일이 되는데, `Date`가 된 뒤에는 원래 문자열을 알 수 없어 볼 방법이 없다. 3월 2일 UTC 자정은 완전히 정상인 값이라 검사를 통과한다. **이 검증은 `parseLocalDateKey`를 거치는 경우에만 유지된다**
+
+거절 메시지에는 **자리 이름만** 담고 값도 내부 함수 이름도 담지 않는다. `Date`를 문자열에 넣으면 실행 환경의 타임존과 로케일에 따라 다른 문장이 나가고(`Sat Aug 01 2026 …`), 검사 함수가 세 가지 사유로 던지므로 하나로 단정한 문구는 나머지에서 앞뒤가 반대인 문장이 된다.
+
+### `assertLocalDateKey`가 값이 없는 경우도 거절한다
+
+`tsconfig.json`이 `strictNullChecks: false`라 `undefined`를 넘기는 호출을 컴파일러가 막지 못한다. 그대로 두면 `undefined.getTime()`이 `TypeError`가 되는데, 그 문구(`Cannot read properties of undefined (reading 'getTime')`)는 무엇을 잘못 넘겼는지 말해 주지 않는다. **어긋난 입력을 오류 종류 하나로 모으는 것**이 이 분기의 값어치다.
+
+**`TodosService`가 맨 앞에서 확인하는 `range == null`은 이유가 다르다.** 그쪽은 `range.from`을 읽는 것이 검사 함수를 부르는 **인자 평가 단계**라 `try` 밖에서 터지고, 그래서 400으로 바꾸는 처리가 통째로 건너뛰어져 실제로 500으로 나간다. 반면 검사 함수 안에서 나는 오류는 종류를 가리지 않고 `BadRequestException`으로 바뀐다.
 
 ### 날짜를 문자열로 내보내는 이유
 
 `@db.Date` 컬럼에서 읽은 값은 UTC 자정을 가리키는 `Date`다. 그대로 내보내면 받는 쪽이 자기 로컬 타임존으로 해석하는데, UTC 자정은 음수 오프셋 지역에서 **전날 오후**라 8월 1일 시작인 할 일이 7월 31일 시작으로 보인다. 날짜만 있고 시각이 없는 값에는 애초에 타임존이 없으므로 `YYYY-MM-DD` 문자열이 옳은 표현이다.
 
-**`formatLocalDateKey`는 UTC 자정이 아닌 `Date`를 거절한다.** `completedAt`이나 `shouldDoAt` 같은 시각 컬럼(`Timestamptz`)을 실수로 넘기면 UTC 기준 날짜가 나오는데, 그 값은 유저 타임존 기준 날짜와 어긋난다 — 한국 시간대 오전에 완료한 기록은 UTC로도 같은 날이라 맞아 보이다가, **저녁에 완료한 기록에서만 하루 어긋난다.** 시각에서 날짜를 뽑아야 한다면 `toLocalDateKey`를 먼저 거쳐야 한다.
+**`formatLocalDateKey`는 UTC 자정이 아닌 `Date`를 거절한다**(검사 자체는 `assertLocalDateKey`에 있고 이 함수가 그것을 부른다). `completedAt`이나 `shouldDoAt` 같은 시각 컬럼(`Timestamptz`)을 실수로 넘기면 UTC 기준 날짜가 나오는데, 그 값은 유저 타임존 기준 날짜와 어긋난다 — 한국 시간대 오전에 완료한 기록은 UTC로도 같은 날이라 맞아 보이다가, **저녁에 완료한 기록에서만 하루 어긋난다.** 시각에서 날짜를 뽑아야 한다면 `toLocalDateKey`를 먼저 거쳐야 한다.
 
 구현이 `toISOString()`을 자르는 것도 같은 방향이다. `getFullYear`·`getMonth`·`getDate`로 조립하면 로컬 타임존에서 하루 밀리는 함정이 되살아나는데, **한국 시간대(UTC+9)에서는 그 실수가 테스트에 드러나지 않는다** — UTC 자정의 로컬 날짜가 같은 날이기 때문이다. `toISOString`에는 로컬 변형이 없어서 그 함정 자체가 없다.
 
@@ -289,7 +307,7 @@
 
 ## 아직 없는 것
 
-- **Controller와 요청 DTO(Data Transfer Object, 요청·응답 형태를 담는 클래스).** 그래서 `remindAt`의 `HH:mm` 형식 검증과 타임존 이름 유효성 검증도 아직 없다 — 값을 받는 경계의 책임이다. **두 목록을 하나로 합쳐 내보낼지도 그때 정한다**(Service가 나눠 두었으므로 합치는 쪽을 나중에 고를 수 있다)
+- **Controller와 요청 DTO(Data Transfer Object, 요청·응답 형태를 담는 클래스).** 그래서 `remindAt`의 `HH:mm` 형식 검증과 타임존 이름 유효성 검증도 아직 없다 — 값을 받는 경계의 책임이다. **날짜 문자열을 `Date`로 바꾸는 것도 같은 자리이고, 지금 그 일을 하는 것은 `TodosService`를 부르는 코드다**(위 "Service는 날짜를 `Date`로 받고"). **두 목록을 하나로 합쳐 내보낼지도 그때 정한다**(Service가 나눠 두었으므로 합치는 쪽을 나중에 고를 수 있다)
 - **알림 대상을 찾는 조회와 그 인덱스.** 실제 조회 조건이 정해질 때(삭제 여부·활성 기간을 함께 볼 것이다) 그에 맞춰 인덱스를 만든다. 미리 만들면 아무도 읽지 않는 인덱스에 쓰기 비용만 든다
 - **일회성 예정일이 지났을 때의 처리.** 예정일을 바꿔도 기록의 날짜는 움직이지 않으므로 옮길 것은 없다. 다만 "예정일이 지난 일회성"을 화면에서 어떻게 다룰지는 Service가 정한다
 

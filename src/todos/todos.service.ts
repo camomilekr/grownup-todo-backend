@@ -10,7 +10,8 @@ import {
   TodoTemplateNotFoundError,
 } from './todo-errors';
 import {
-  parseLocalDateKey,
+  assertLocalDateKey,
+  formatLocalDateKey,
   toHistoriedOn,
   toLocalDateKey,
 } from './todo-local-date';
@@ -35,21 +36,33 @@ import type { TodoDetail, TodoListItem, TodoProgress } from './todo-view';
 /**
  * 상세 조회가 이력을 가져올 기간. **양 끝 날짜를 포함한다.**
  *
- * `Date`가 아니라 `YYYY-MM-DD` 문자열로 받는다. `@db.Date` 컬럼에 넘길 `Date`를 손으로
- * 만들면 한국 시간대에서 하루 앞으로 밀리므로(`todo-local-date.ts`) **이 폴더 밖에서
- * `Date`를 만들 기회를 주지 않는 것**이 목적이다. 형식과 달력 검증도 함께 걸린다.
+ * **두 값은 UTC 자정을 가리키는 `Date`여야 한다.** 날짜 컬럼(`@db.Date`)과 비교되는
+ * 값인데, 어댑터가 그 컬럼용 값을 UTC 컴포넌트로 직렬화하기 때문이다. 어긋난 값은
+ * `getTodo`가 `BadRequestException`으로 거절한다.
+ *
+ * **그 `Date`를 만드는 것은 부르는 쪽의 책임이다.** 사용자가 고른 날짜 문자열에서
+ * 만든다면 **반드시 `parseLocalDateKey`를 거쳐라**(`todo-local-date.ts`). 이유가 둘이다.
+ *
+ * - `new Date(2026, 7, 1)`은 **로컬 타임존** 자정이라 한국 시간대에서 하루 앞의 날짜와
+ *   비교된다. `parseLocalDateKey`는 `Date.UTC`로만 값을 만들어 그 실수가 불가능하다
+ * - **달력 검증이 그 함수에만 있다.** `2026-02-30`은 `Date.UTC`가 조용히 3월 2일로
+ *   바꾸는데, `Date`가 된 뒤에는 원래 문자열을 알 수 없어 이 계층이 그것을 볼 방법이 없다
+ *
+ * 값을 받는 경계 계층(Controller)이 이 저장소에 아직 없다. 그래서 지금 그 책임은
+ * `TodosService`를 부르는 코드 전부에 있다.
  */
 export type TodoHistoryRange = {
-  from: string;
-  until: string;
+  from: Date;
+  until: Date;
 };
 
 /**
  * 할 일을 새로 만들 때 받는 값.
  *
- * 활성 기간은 `TodoHistoryRange`와 같은 이유로 `YYYY-MM-DD` 문자열이다. 예정일
- * (`shouldDoAt`)은 시각(`Timestamptz`)이라 `Date`로 받는다 — 날짜만 있는 값과 달리
- * 순간을 가리키므로 문자열로 줄이면 시·분이 사라진다.
+ * 활성 기간은 날짜 컬럼(`@db.Date`)에 들어가므로 **UTC 자정 `Date`**여야 한다. 그 값을
+ * 만드는 책임이 어디에 있는지는 `TodoHistoryRange` 주석에 있고 같은 규칙이다. 예정일
+ * (`shouldDoAt`)은 시각 컬럼(`Timestamptz`)이라 자정일 필요가 없다 — 순간을 가리키는
+ * 값이라 시·분이 그대로 저장된다.
  */
 export type CreateTodoInput = {
   title: string;
@@ -62,8 +75,8 @@ export type CreateTodoInput = {
   shouldDoAt?: Date | null;
   targetValue?: number | null;
   targetUnit?: string | null;
-  activeFrom?: string | null;
-  activeUntil?: string | null;
+  activeFrom?: Date | null;
+  activeUntil?: Date | null;
 };
 
 /**
@@ -80,8 +93,8 @@ export type UpdateTodoInput = {
   shouldDoAt?: Date | null;
   targetValue?: number | null;
   targetUnit?: string | null;
-  activeFrom?: string | null;
-  activeUntil?: string | null;
+  activeFrom?: Date | null;
+  activeUntil?: Date | null;
 };
 
 /**
@@ -209,14 +222,17 @@ export class TodosService {
    * 같은 요청이 반복 방식에 따라 다르게 거절되면 부르는 쪽이 결과를 예측할 수 없다.
    *
    * @throws {NotFoundException} 그런 할 일이 없거나 남의 것일 때
-   * @throws {BadRequestException} 범위 날짜의 형식이 어긋나거나 시작일이 종료일보다 늦을 때
+   * @throws {BadRequestException} 범위 날짜가 UTC 자정이 아니거나 시작일이 종료일보다 늦을 때
    */
   async getTodo(
     userId: bigint,
     todoId: bigint,
     range: TodoHistoryRange,
   ): Promise<TodoDetail> {
-    const { from, until } = this.parseRange(range);
+    // 검사가 먼저다. 범위 자체가 없는 경우를 이 안에서 막으므로 **아래 구조 분해보다
+    // 앞에 와야 한다** — 순서를 바꾸면 `undefined`를 분해하며 `TypeError`가 난다.
+    this.assertRange(range);
+    const { from, until } = range;
 
     // 소유자를 조건으로 읽는다. 남의 할 일은 `null`로 돌아와 "없는 것"과 같아진다.
     // **완료 기록을 쓰는 경로가 이 결과의 `userId`를 요청자의 것으로 신뢰하므로**,
@@ -275,10 +291,10 @@ export class TodosService {
     userId: bigint,
     input: CreateTodoInput,
   ): Promise<TodoListItem> {
-    // 날짜 문자열을 먼저 `Date`로 바꾼다. `@db.Date` 컬럼에 넘길 값을 손으로 만들면
-    // 한국 시간대에서 하루 앞으로 밀려 저장되고 예외가 나지 않는다(`todo-local-date.ts`).
-    const activeFrom = this.parseActiveDate('활성 시작일', input.activeFrom);
-    const activeUntil = this.parseActiveDate('활성 종료일', input.activeUntil);
+    // 활성 기간이 날짜 컬럼(`@db.Date`)에 넣어도 되는 값인지 먼저 본다. 어긋난 값은
+    // **예외 없이 하루 밀려 저장되므로**(`todo-local-date.ts`) 저장 뒤에는 드러나지 않는다.
+    this.assertActiveDate('활성 시작일', input.activeFrom);
+    this.assertActiveDate('활성 종료일', input.activeUntil);
 
     this.assertShape({
       todoType: input.todoType,
@@ -286,8 +302,8 @@ export class TodosService {
       targetValue: input.targetValue ?? null,
       targetUnit: input.targetUnit ?? null,
       shouldDoAt: input.shouldDoAt ?? null,
-      activeFrom,
-      activeUntil,
+      activeFrom: input.activeFrom ?? null,
+      activeUntil: input.activeUntil ?? null,
     });
 
     // `?? null`로 못 박은 자리는 값을 주지 않았을 때 무엇이 저장되는지를 이 자리에서 읽게
@@ -303,8 +319,8 @@ export class TodosService {
       shouldDoAt: input.shouldDoAt ?? null,
       targetValue: input.targetValue ?? null,
       targetUnit: input.targetUnit ?? null,
-      activeFrom,
-      activeUntil,
+      activeFrom: input.activeFrom ?? null,
+      activeUntil: input.activeUntil ?? null,
     });
 
     return toTodoListItem(created, null);
@@ -337,8 +353,8 @@ export class TodosService {
       throw new NotFoundException(`그런 할 일이 없다 (todoId=${todoId})`);
     }
 
-    const activeFrom = this.parseActiveDate('활성 시작일', input.activeFrom);
-    const activeUntil = this.parseActiveDate('활성 종료일', input.activeUntil);
+    this.assertActiveDate('활성 시작일', input.activeFrom);
+    this.assertActiveDate('활성 종료일', input.activeUntil);
 
     // 검증은 **바뀐 뒤의 최종 상태**를 본다. 주지 않은 필드(`undefined`)에는 저장된 값이
     // 그대로 남으므로 그것을 넣고, `null`("비우라")은 그대로 쓴다. 입력만 보면 "숫자형
@@ -354,8 +370,12 @@ export class TodosService {
         input.targetUnit === undefined ? stored.targetUnit : input.targetUnit,
       shouldDoAt:
         input.shouldDoAt === undefined ? stored.shouldDoAt : input.shouldDoAt,
-      activeFrom: activeFrom === undefined ? stored.activeFrom : activeFrom,
-      activeUntil: activeUntil === undefined ? stored.activeUntil : activeUntil,
+      activeFrom:
+        input.activeFrom === undefined ? stored.activeFrom : input.activeFrom,
+      activeUntil:
+        input.activeUntil === undefined
+          ? stored.activeUntil
+          : input.activeUntil,
     });
 
     const data = omitUndefined<UpdateTodoTemplateInput>({
@@ -365,10 +385,8 @@ export class TodosService {
       shouldDoAt: input.shouldDoAt,
       targetValue: input.targetValue,
       targetUnit: input.targetUnit,
-      // 파싱한 값을 넣는다. 입력이 `undefined`면 파싱하지 않아 `undefined`가 그대로
-      // 남고 위 함수가 키를 빼낸다.
-      activeFrom,
-      activeUntil,
+      activeFrom: input.activeFrom,
+      activeUntil: input.activeUntil,
     });
 
     try {
@@ -676,30 +694,24 @@ export class TodosService {
   }
 
   /**
-   * 활성 기간 문자열을 `@db.Date` 컬럼에 넘길 UTC 자정 `Date`로 바꾼다.
+   * 활성 기간으로 받은 값이 날짜 컬럼(`@db.Date`)에 넣어도 되는지 본다.
    *
-   * **`undefined`와 `null`을 바꾸지 않고 그대로 통과시킨다.** 고치기에서 앞은 "그대로
-   * 두라"이고 뒤는 "비우라"라서 뜻이 다른데, 어느 쪽도 날짜로 바꿀 것이 없다. 여기서 둘을
-   * `null` 하나로 뭉개면 부르는 쪽이 그 구분을 되찾을 방법이 없다.
+   * **값이 없는 것은 어긋난 것이 아니다.** 고치기에서 `undefined`는 "그대로 두라"이고
+   * `null`은 "비우라"라서 뜻이 다르지만, 어느 쪽도 날짜가 아니므로 검사할 것이 없다. 두
+   * 뜻의 구분은 이 함수가 아니라 부르는 쪽이 값을 그대로 넘기며 지킨다.
    *
-   * **두 갈래를 느슨한 비교 하나로 합칠 수 없다.** `tsconfig.json`이
-   * `strictNullChecks: false`라서 반환 타입의 `| null | undefined`가 `Date`로 붕괴하고
-   * 인자의 `string | null | undefined`도 `string`으로 붕괴한다. 그래서
-   * `value == null ? value : …`는 `string`을 `Date` 자리에 반환하는 것이 되어
-   * `TS2322`로 거절된다(실측). **그 구분을 지키는 것은 타입이 아니라 아래 두 문장이다.**
+   * 느슨한 비교(`!= null`) 하나로 둘을 함께 거르는 것이 여기서는 안전하다. **값을
+   * 만들어 돌려주지 않고 검사만 하므로** 반환 타입에서 두 뜻이 뭉개질 여지가 없다.
    */
-  private parseActiveDate(
+  private assertActiveDate(
     label: string,
-    value: string | null | undefined,
-  ): Date | null | undefined {
-    if (value === undefined) {
-      return undefined;
-    }
-    if (value === null) {
-      return null;
+    value: Date | null | undefined,
+  ): void {
+    if (value == null) {
+      return;
     }
 
-    return this.parseDateKey(label, value);
+    this.assertDateKey(label, value);
   }
 
   /**
@@ -774,20 +786,12 @@ export class TodosService {
   }
 
   /**
-   * 범위 문자열을 `@db.Date` 컬럼에 넘길 UTC 자정 `Date` 한 쌍으로 바꾼다.
-   *
-   * `parseLocalDateKey`가 던지는 `RangeError`를 `BadRequestException`으로 바꾼다. 그대로
-   * 새게 두면 클라이언트가 잘못 보낸 값이 500으로 나가 서버 장애처럼 보인다.
-   *
-   * **원본 메시지를 응답에 이어 붙이지 않는다.** 두 가지가 어긋나기 때문이다. 그 함수는
-   * 형식이 어긋난 경우와 **달력에 없는 날짜**인 경우를 모두 던지므로 "형식이 잘못됐다"고
-   * 단정하면 뒤쪽에서 앞뒤가 반대인 문장이 되고, 이어 붙이면 내부 함수 이름이 클라이언트
-   * 응답에 나간다. 원인 상세는 로그로 보내고 응답에는 **어느 값이 문제인지**만 담는다.
+   * 이력 조회 범위가 날짜 컬럼(`@db.Date`)과 비교해도 되는 값인지 본다.
    *
    * **뒤집힌 범위도 거절한다.** 그대로 조회하면 항상 빈 배열이 돌아오고, 그것은 "그 기간에
    * 기록이 없다"와 구별되지 않는다 — 아무 오류 없이 잘못된 화면이 그려지는 쪽이다.
    */
-  private parseRange(range: TodoHistoryRange): { from: Date; until: Date } {
+  private assertRange(range: TodoHistoryRange): void {
     // 범위 자체가 비어 있는 경우를 먼저 막는다. `strictNullChecks`가 꺼져 있어 컴파일러가
     // `undefined`를 넘기는 호출을 막지 못하고, 그대로 두면 값을 읽는 자리에서 `TypeError`가
     // 나 **400이어야 할 것이 500으로 나간다.**
@@ -795,43 +799,53 @@ export class TodosService {
       throw new BadRequestException('기간 범위가 없다');
     }
 
-    const from = this.parseDateKey('기간 범위의 시작일', range.from);
-    const until = this.parseDateKey('기간 범위의 종료일', range.until);
+    this.assertDateKey('기간 범위의 시작일', range.from);
+    this.assertDateKey('기간 범위의 종료일', range.until);
 
-    if (from.getTime() > until.getTime()) {
+    // 위 검사를 통과한 값만 여기 온다. 그래서 `formatLocalDateKey`가 던질 수 없고, 메시지에
+    // 실리는 표현도 실행 환경의 타임존에 흔들리지 않는다 — `Date`를 그대로 문자열에 넣으면
+    // `Sat Aug 01 2026 …`처럼 기계마다 다른 문장이 나간다.
+    if (range.from.getTime() > range.until.getTime()) {
       throw new BadRequestException(
-        `기간 범위의 시작일이 종료일보다 늦다 (from=${range.from}, until=${range.until})`,
+        `기간 범위의 시작일이 종료일보다 늦다 ` +
+          `(from=${formatLocalDateKey(range.from)}, until=${formatLocalDateKey(range.until)})`,
       );
     }
-
-    return { from, until };
   }
 
   /**
-   * 날짜 문자열 하나를 날짜 키로 바꾸고, 실패를 `BadRequestException`으로 바꾼다.
+   * 날짜 하나가 날짜 컬럼(`@db.Date`)에 넣어도 되는 값인지 보고, 실패를
+   * `BadRequestException`으로 바꾼다.
+   *
+   * `assertLocalDateKey`가 던지는 `RangeError`를 그대로 새게 두면 부르는 쪽이 잘못 만든
+   * 값이 500으로 나가 서버 장애처럼 보인다.
+   *
+   * **원본 메시지를 응답에 이어 붙이지 않는다.** 그 함수는 값이 없는 경우·유효하지 않은
+   * `Date`·UTC 자정이 아닌 경우를 모두 던지므로 하나로 단정한 문구를 붙이면 나머지에서
+   * 앞뒤가 반대인 문장이 되고, 이어 붙이면 내부 함수 이름이 응답에 나간다. 원인 상세는
+   * 로그로 보내고 응답에는 **어느 값이 문제인지**만 담는다.
    *
    * **날짜 한 쪽씩 나눠 부르는 이유가 둘이다.** 어느 값이 문제인지 응답에 담을 수 있고,
    * `catch`가 검사 대상을 **다시 읽지 않는다** — 인자로 이미 받은 값을 쓰므로 오류를
    * 다루는 자리가 스스로 던질 여지가 없다.
    *
-   * **자리 이름을 인자로 받아 기간 범위와 활성 기간이 같은 함수를 쓴다.** 둘 다
-   * `YYYY-MM-DD` 문자열을 `@db.Date` 컬럼용 `Date`로 바꾸는 같은 일이고, 다른 것은 응답에
-   * 실을 이름뿐이다.
-   *
    * @param label 응답에 실을 자리 이름. 어느 값이 어긋났는지 알려 준다. 그대로 문장의
    *   주어가 되므로 `'기간 범위의 시작일'`처럼 완결된 이름을 넘긴다
    */
-  private parseDateKey(label: string, value: string): Date {
+  private assertDateKey(label: string, value: Date): void {
     try {
-      return parseLocalDateKey(value);
+      assertLocalDateKey(value);
     } catch (error) {
       // 원인을 삼키지 않는다. 어떻게 어긋났는지가 이 메시지에 있고 그것을 응답이 아니라
-      // 로그에 남긴다 — 클라이언트 입력 오류이므로 `error`가 아니라 `warn`이다.
+      // 로그에 남긴다 — 부르는 쪽의 입력 오류이므로 `error`가 아니라 `warn`이다.
       this.logger.warn(
         `${label}을 해석할 수 없다: ${(error as Error).message}`,
       );
 
-      throw new BadRequestException(`${label}이 올바르지 않다 (${value})`);
+      // **값을 응답에 싣지 않는다.** `Date`를 문자열에 넣으면 실행 환경의 타임존과 로케일에
+      // 따라 다른 문장이 나가고, 여기 오는 값은 유효하지 않은 `Date`일 수도 있어 UTC 표현
+      // 으로 바꾸는 것도 안전하지 않다. 어느 자리가 문제인지는 위 이름이 답한다.
+      throw new BadRequestException(`${label}이 올바르지 않다`);
     }
   }
 }

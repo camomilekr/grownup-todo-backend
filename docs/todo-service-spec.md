@@ -1,6 +1,6 @@
 # 할 일 도메인 Service·Repository 함수 명세
 
-> 마지막 업데이트: 2026-08-01
+> 마지막 업데이트: 2026-08-02
 >
 > 대상 코드
 >
@@ -41,13 +41,24 @@ Service는 그 셋을 HTTP 예외로 바꾼다. `null`은 `NotFoundException`으
 
 **남의 것과 지워진 것을 구분해 알려 주지 않는다.** 둘 다 "그런 할 일이 없다"로 합친다. 권한 없음으로 나누면 번호를 훑어서 남이 어떤 할 일을 가졌는지 세어 볼 수 있다.
 
-### 3. 날짜를 받는 인자의 형식이 자리마다 다르다
+### 3. Service의 날짜 인자는 전부 `Date`이고, 자리마다 요구하는 것이 다르다
 
-같은 "날짜"인데 어떤 자리는 `YYYY-MM-DD` 문자열로 받고 어떤 자리는 `Date`로 받는다. 섞어 쓰면 조용히 하루가 밀리므로 자리마다 무엇인지 확인해야 한다.
+**Service가 날짜 문자열을 받는 자리는 없다.** 인자는 전부 `Date`인데, 같은 `Date`라도 자리에 따라 요구하는 것이 다르다.
 
-**문자열(`YYYY-MM-DD`)로 받는 자리** — 활성 기간(`CreateTodoInput.activeFrom`·`activeUntil`, `UpdateTodoInput`의 같은 두 필드)과 이력 조회 범위(`TodoHistoryRange.from`·`until`)다. 이 값들은 `date` 컬럼(`@db.Date`)에 들어가거나 그 컬럼과 비교되는데, **그 컬럼에 넣을 `Date`를 손으로 만들면 하루 밀린다.** 한국 시간대에서 `new Date(2026, 7, 1).toISOString()`은 `2026-07-31T15:00:00.000Z`이고 저장되는 날짜는 `2026-07-31`이 된다 — 예외가 하나도 나지 않아서 매일 반복 할 일이 하루 일찍 시작되고 어떤 테스트도 잡지 못한다. 그래서 `Date`를 만들 기회를 이 도메인 밖에 주지 않고, 문자열을 받아 `parseLocalDateKey`가 UTC 자정 `Date`로 바꾼다. 형식 검사와 달력 검사도 그 함수가 함께 한다.
+**UTC 자정이어야 하는 자리** — 활성 기간(`CreateTodoInput.activeFrom`·`activeUntil`, `UpdateTodoInput`의 같은 두 필드)과 이력 조회 범위(`TodoHistoryRange.from`·`until`)다. 이 값들은 `date` 컬럼(`@db.Date`)에 들어가거나 그 컬럼과 비교되는데, 어댑터가 그 컬럼용 값을 `getUTCFullYear`/`getUTCMonth`/`getUTCDate`로 직렬화하기 때문이다. **어긋난 값을 넘기면 하루 밀려 저장된다** — 한국 시간대에서 `new Date(2026, 7, 1).toISOString()`은 `2026-07-31T15:00:00.000Z`이고 저장되는 날짜는 `2026-07-31`이다. 예외가 하나도 나지 않아서 매일 반복 할 일이 하루 일찍 시작되고 어떤 테스트도 잡지 못한다. 그래서 **Service가 네 자리 각각에서 UTC 자정인지 확인하고**, 어긋나면 `BadRequestException`으로 거절한다(`assertLocalDateKey`).
 
-**`Date`로 받는 자리** — 수행 시각(`SaveProgressInput.performedAt`, `completeTodo`·`uncompleteTodo`의 `performedAt`), 기준 순간(`listDailyOn`의 `at`), 예정일(`CreateTodoInput.shouldDoAt`)이다. 이쪽은 날짜가 아니라 **순간**을 가리킨다. 수행 시각은 유저마다 하루가 바뀌는 자리가 달라서 "며칠인지"를 서버가 계산해야 하고, 예정일은 시각 컬럼(`Timestamptz`)이라 문자열로 줄이면 시·분이 사라진다.
+**순간을 가리키는 자리** — 수행 시각(`SaveProgressInput.performedAt`, `completeTodo`·`uncompleteTodo`의 `performedAt`), 기준 순간(`listDailyOn`의 `at`), 예정일(`CreateTodoInput.shouldDoAt`)이다. 이쪽은 날짜가 아니라 순간이라 자정일 필요가 없다. 수행 시각은 유저마다 하루가 바뀌는 자리가 달라서 "며칠인지"를 서버가 계산해야 하고, 예정일은 시각 컬럼(`Timestamptz`)이라 시·분이 그대로 저장된다.
+
+#### 그 `Date`를 만드는 것은 부르는 쪽의 책임이다
+
+값을 받는 경계 계층(Controller)이 이 저장소에 아직 없다. 그래서 지금 그 책임은 `TodosService`를 부르는 코드 전부에 있다.
+
+**사용자가 고른 날짜 문자열에서 만든다면 반드시 `parseLocalDateKey`를 거쳐야 한다.** 이유가 둘이고, 둘째가 더 중요하다.
+
+- `new Date(2026, 7, 1)`은 **로컬 타임존** 자정이라 위의 하루 밀림에 걸린다. `parseLocalDateKey`는 `Date.UTC`로만 값을 만들어 그 실수가 원천적으로 불가능하다. 이쪽은 실수해도 Service가 거절해 준다
+- **달력 검증이 그 함수에만 있다.** `2026-02-30`을 `Date.UTC`는 조용히 3월 2일로 바꾸는데, `Date`가 된 뒤에는 원래 문자열을 알 수 없어 **Service가 그것을 볼 방법이 없다.** 3월 2일 UTC 자정은 완전히 정상인 값이라 검사를 통과한다. 이 검증은 `parseLocalDateKey`를 거치는 경우에만 유지된다
+
+`new Date('2026-08-01')`이 마침 UTC 자정으로 파싱되는 것에 기대지 마라. 그 동작은 문자열 형식에 따라 갈리고(`'2026-8-1'`은 구현 정의 동작으로 로컬 시각이 된다), 달력에 없는 날짜를 조용히 넘긴다.
 
 **Repository의 날짜 인자는 셋 다 `Date`다**(`findDailyActiveOn`·`findByTodoIdAndHistoriedOn`·`findDailyHistoriesOn`의 `historiedOn`, `findByTodoIdBetween`의 `from`·`until`). 이미 만들어진 날짜 키를 받는 자리이고, 만드는 것은 `src/todos/todo-local-date.ts`의 함수들이다 — `toHistoriedOn`(기록 날짜), `toLocalDateKey`(그 순간이 유저에게 며칠인지), `parseLocalDateKey`(사용자가 고른 날짜).
 
@@ -81,7 +92,7 @@ Service는 그 셋을 HTTP 예외로 바꾼다. `null`은 `NotFoundException`으
 
 `tsconfig.json`이 **`strictNullChecks: false`**다. 그래서 인자 타입에 `?`가 없어도 컴파일러가 `undefined`를 넘기는 호출을 막아 주지 않고, 아래 자리들은 실제로 그 값이 빠졌을 때 서로 다르게 실패한다. **선언만 보고 "필수니까 검사돼 있다"고 읽지 마라.**
 
-- **`TodoHistoryRange.from`·`until`을 주지 않으면 `BadRequestException`으로 떨어진다.** 날짜 형식 정규식이 `undefined`를 문자열 `'undefined'`로 강제 변환해 매치에 실패하고, `parseLocalDateKey`가 던지는 `RangeError`를 Service가 400으로 바꾼다. `range` 객체 자체가 없는 경우는 `parseRange`가 맨 앞에서 `range == null`을 검사해 같은 예외로 거절한다 — 그 검사가 없으면 값을 읽는 자리에서 `TypeError`가 나 **400이어야 할 것이 500으로 나간다**
+- **`TodoHistoryRange.from`·`until`을 주지 않으면 `BadRequestException`으로 떨어진다.** `assertLocalDateKey`가 맨 앞에서 값이 없는 경우를 검사해 `RangeError`를 던지고 Service가 그것을 400으로 바꾼다. **Service는 오류 종류를 가리지 않고 바꾸므로** 그 검사가 없어 `TypeError`가 나더라도 400인 것은 같다 — 달라지는 것은 로그에 남는 원인 문구다. `range` 객체 자체가 없는 경우는 **성질이 다르다.** `assertRange`가 맨 앞에서 `range == null`을 검사하는데, 그 검사가 없으면 `range.from`을 읽는 **인자 평가 단계**에서 터져 400으로 바꾸는 처리를 통째로 건너뛰고 **500으로 나간다**
 - **`performedAt`을 주지 않으면 반복 방식에 따라 갈린다.** 매일 반복은 `toLocalDateKey`가 `undefined.getTime()`을 부르며 `TypeError`를 던지고 그것이 그대로 새어 500이 된다. 일회성은 그 값을 쓰지 않으므로 아무 오류 없이 통과한다. `listDailyOn`의 `at`도 같은 자리다
 - **`SaveProgressInput.progressValue`를 주지 않으면 오류 없이 아무것도 저장되지 않는다.** `undefined`가 담긴 갱신 대상은 Prisma가 "그대로 두라"로 읽으므로, 기록이 있으면 진행값이 바뀌지 않고 없으면 진행값이 빈 행이 만들어진다
 - **`completeTodo`의 `performedAt`도 같은 성질을 갖는다.** 일회성에서 이 값이 없으면 완료 시각이 갱신 대상에서 빠져, 기록이 없으면 완료 시각이 빈 행이 만들어지고 있으면 완료 표시가 그대로 남는다. **완료를 요청했는데 완료로 찍히지 않고 오류도 나지 않는다**
@@ -189,12 +200,12 @@ getTodo(userId: bigint, todoId: bigint, range: TodoHistoryRange): Promise<TodoDe
 | 예외                    | 언제                                                                                                             |
 | ----------------------- | ---------------------------------------------------------------------------------------------------------------- |
 | `BadRequestException`    | `range`가 없을 때(`기간 범위가 없다`)                                                                            |
-| `BadRequestException`    | `from`·`until`의 형식이 `YYYY-MM-DD`가 아니거나 달력에 없는 날짜일 때. 어느 자리인지를 메시지에 담는다           |
+| `BadRequestException`    | `from`·`until`이 없거나, 유효하지 않은 `Date`거나, UTC 자정이 아닐 때. 어느 자리인지를 메시지에 담는다           |
 | `BadRequestException`    | 시작일이 종료일보다 늦을 때(`기간 범위의 시작일이 종료일보다 늦다 (from=…, until=…)`). 같은 날짜는 허용한다      |
 | `NotFoundException`      | 그런 할 일이 없거나 **남의 것일 때**(`그런 할 일이 없다 (todoId=…)`)                                             |
 | Prisma 오류              | 데이터베이스 접근이 실패했을 때                                                                                  |
 
-거절 메시지에 **내부 함수 이름을 담지 않는다.** 원인 상세는 로그로 보내고 응답에는 어느 값이 문제인지만 담는다 — 그 함수는 형식이 어긋난 경우와 달력에 없는 날짜인 경우를 모두 던지므로 "형식이 잘못됐다"고 단정하면 뒤쪽에서 앞뒤가 반대인 문장이 된다.
+거절 메시지에 **내부 함수 이름도 값 자체도 담지 않는다.** 원인 상세는 로그로 보내고 응답에는 어느 자리가 문제인지만 담는다. 이유가 둘이다 — 검사 함수가 세 가지 사유로 던지므로 하나로 단정한 문구를 붙이면 나머지에서 앞뒤가 반대인 문장이 되고, `Date`를 그대로 문자열에 넣으면 실행 환경의 타임존과 로케일에 따라 다른 문장이 나간다(`Sat Aug 01 2026 …`). 뒤집힌 범위 메시지만 값을 담는데, 그 자리는 검사를 이미 통과한 값이라 `formatLocalDateKey`로 `YYYY-MM-DD`를 만들 수 있다.
 
 ### `createTodo`
 
@@ -217,12 +228,12 @@ createTodo(userId: bigint, input: CreateTodoInput): Promise<TodoListItem>
 
 | 예외                  | 언제                                                                                                  |
 | --------------------- | ----------------------------------------------------------------------------------------------------- |
-| `BadRequestException`  | 활성 기간 날짜의 형식이 어긋나거나 달력에 없는 날짜일 때. 어느 자리인지를 메시지에 담는다             |
+| `BadRequestException`  | 활성 기간 날짜가 유효하지 않은 `Date`거나 UTC 자정이 아닐 때. 어느 자리인지를 메시지에 담는다         |
 | `BadRequestException`  | 위 [만들기와 고치기가 함께 통과하는 규칙](#만들기와-고치기가-함께-통과하는-규칙) 다섯 중 하나에 걸릴 때 |
 | Prisma 오류(`P2003`)   | `userId`에 해당하는 유저 행이 없을 때. 참조 대상이 없다는 뜻의 외래키 위반이다                        |
 | Prisma 오류            | 그 밖에 데이터베이스 접근이 실패했을 때                                                               |
 
-**거절되면 만들지 않는다.** 날짜 파싱과 규칙 검사가 저장보다 앞이다.
+**거절되면 만들지 않는다.** 날짜 검사와 규칙 검사가 저장보다 앞이다.
 
 ### `updateTodo`
 
@@ -250,7 +261,7 @@ updateTodo(userId: bigint, todoId: bigint, input: UpdateTodoInput): Promise<void
 | --------------------- | ----------------------------------------------------------------------------------------------------------- |
 | `NotFoundException`    | 그런 할 일이 없거나 남의 것이거나 이미 지워졌을 때 (고치기 전에 읽는 단계에서 걸린다)                       |
 | `NotFoundException`    | 읽은 뒤 쓰기 사이에 그 할 일이 지워졌을 때. Prisma의 `P2025`(고칠 행을 찾지 못했다)를 바꾼 것이다            |
-| `BadRequestException`  | 활성 기간 날짜의 형식이 어긋나거나 달력에 없는 날짜일 때                                                    |
+| `BadRequestException`  | 활성 기간 날짜가 유효하지 않은 `Date`거나 UTC 자정이 아닐 때                                                |
 | `BadRequestException`  | **바뀐 뒤의 형태**가 위 다섯 규칙 중 하나에 걸릴 때                                                         |
 | Prisma 오류            | `P2025` 밖의 오류는 바꾸지 않고 그대로 올린다                                                               |
 
@@ -708,8 +719,8 @@ findTimeZone(userId: bigint): Promise<string | null>
 | `shouldDoAt`   | `Date \| null`   | 아니오   | 일회성의 예정일. 시각 컬럼(`Timestamptz`)이라 `Date`다. **매일 반복에는 둘 수 없다**         |
 | `targetValue`  | `number \| null` | 아니오   | 목표치. `targetUnit`과 **한 쌍**이다                                                        |
 | `targetUnit`   | `string \| null` | 아니오   | 목표치의 단위(`회`·`분`처럼). 16자까지다                                                    |
-| `activeFrom`   | `string \| null` | 아니오   | 매일 반복의 활성 시작일(`YYYY-MM-DD`, **포함**). **일회성에는 둘 수 없다**                   |
-| `activeUntil`  | `string \| null` | 아니오   | 활성 종료일(`YYYY-MM-DD`, **포함**). 비어 있으면 기한이 없다                                |
+| `activeFrom`   | `Date \| null`   | 아니오   | 매일 반복의 활성 시작일(**UTC 자정**, 그날 **포함**). **일회성에는 둘 수 없다**              |
+| `activeUntil`  | `Date \| null`   | 아니오   | 활성 종료일(**UTC 자정**, 그날 **포함**). 비어 있으면 기한이 없다                           |
 
 값을 주지 않은 옵셔널 필드는 `null`로 저장된다 — Service가 `?? null`로 못 박아 무엇이 저장되는지가 코드에 드러난다.
 
@@ -727,8 +738,8 @@ findTimeZone(userId: bigint): Promise<string | null>
 | `shouldDoAt`  | `Date \| null`   | 아니오   | 일회성의 예정일                                         |
 | `targetValue` | `number \| null` | 아니오   | 목표치                                                  |
 | `targetUnit`  | `string \| null` | 아니오   | 목표치의 단위                                           |
-| `activeFrom`  | `string \| null` | 아니오   | 활성 시작일(`YYYY-MM-DD`)                               |
-| `activeUntil` | `string \| null` | 아니오   | 활성 종료일(`YYYY-MM-DD`)                               |
+| `activeFrom`  | `Date \| null`   | 아니오   | 활성 시작일(**UTC 자정**)                               |
+| `activeUntil` | `Date \| null`   | 아니오   | 활성 종료일(**UTC 자정**)                               |
 
 #### SaveProgressInput
 
@@ -745,12 +756,12 @@ findTimeZone(userId: bigint): Promise<string | null>
 
 `TodosService.getTodo`가 받는 이력 조회 기간이다. **양 끝 날짜를 포함한다.**
 
-`Date`가 아니라 `YYYY-MM-DD` 문자열로 받는 이유는 위 [날짜를 받는 인자의 형식](#3-날짜를-받는-인자의-형식이-자리마다-다르다)에 있다 — 이 도메인 밖에서 `Date`를 만들 기회를 주지 않는 것이 목적이고, 형식과 달력 검증도 함께 걸린다.
+**두 값은 UTC 자정을 가리키는 `Date`여야 한다.** 그 이유와, 그 값을 만드는 것이 부르는 쪽의 책임이라는 것은 위 [Service의 날짜 인자](#3-service의-날짜-인자는-전부-date이고-자리마다-요구하는-것이-다르다)에 있다. 사용자가 고른 날짜 문자열에서 만든다면 **`parseLocalDateKey`를 거쳐라** — 달력 검증(`2026-02-30` 거절)이 그 함수에만 있다.
 
-| 이름    | 타입     | required | 설명                                    |
-| ------- | -------- | -------- | --------------------------------------- |
-| `from`  | `string` | 예       | 범위 시작일(`YYYY-MM-DD`, **포함**)     |
-| `until` | `string` | 예       | 범위 종료일(`YYYY-MM-DD`, **포함**)     |
+| 이름    | 타입   | required | 설명                                          |
+| ------- | ------ | -------- | --------------------------------------------- |
+| `from`  | `Date` | 예       | 범위 시작일(**UTC 자정**, 그날 **포함**)      |
+| `until` | `Date` | 예       | 범위 종료일(**UTC 자정**, 그날 **포함**)      |
 
 같은 날짜를 넣는 것은 허용한다. 시작일이 종료일보다 늦으면 `BadRequestException`이다 — 그대로 조회하면 항상 빈 배열이 돌아오고 그것은 "그 기간에 기록이 없다"와 구별되지 않는다.
 
