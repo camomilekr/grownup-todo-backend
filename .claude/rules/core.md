@@ -100,9 +100,12 @@ git switch develop && git pull && git switch -c feature/fix-midnight-rollover
 ### 검토 대상을 고정한다
 
 ```bash
-.claude/scripts/fingerprint.sh          # 리뷰 시작 전
-.claude/scripts/fingerprint.sh          # 리뷰 결과를 받은 뒤 · 커밋 직전
+# 워크트리 경로를 반드시 넘긴다. 인자를 빼면 셸의 현재 위치에서 찍힌다
+.claude/scripts/fingerprint.sh .claude/worktrees/step-goal-presets    # 리뷰 시작 전
+.claude/scripts/fingerprint.sh .claude/worktrees/step-goal-presets    # 리뷰 결과를 받은 뒤 · 커밋 직전
 ```
+
+**경로를 빼먹으면 저장소 루트의 지문이 찍힌다.** 셸의 현재 위치는 도구 호출 사이에 루트로 돌아가고, 그러면 워크트리와 전혀 다른 값이 나온다 — 정상적인 판정을 "리뷰어가 본 것과 다르다"고 오판해 루프를 멈추게 된다. 실제로 한 번 걸렸다. `npm test`도 같은 함정이 있다. 루트에서 돌리면 워크트리의 새 테스트가 없어 `No tests found`가 나오고, 그것을 통과로 읽으면 아무것도 검증하지 않은 것이 된다.
 
 **세 값이 같아야 그 판정이 커밋에 유효하다.** 다르면 리뷰어가 본 것과 지금 코드가 달라, 그 판정으로 지적을 넘기거나 커밋해서는 안 된다. 리뷰어에게도 판정 기준 지문을 보고에 적도록 요구한다.
 
