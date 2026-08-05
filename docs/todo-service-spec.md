@@ -45,9 +45,9 @@ Service는 그 셋을 HTTP 예외로 바꾼다. `null`은 `NotFoundException`으
 
 **Service가 날짜 문자열을 받는 자리는 없다.** 인자는 전부 `Date`인데, 같은 `Date`라도 자리에 따라 요구하는 것이 다르다.
 
-**UTC 자정이어야 하는 자리** — 활성 기간(`CreateTodoInput.activeFrom`·`activeUntil`, `UpdateTodoInput`의 같은 두 필드)과 이력 조회 범위(`TodoHistoryRange.from`·`until`)다. 이 값들은 `date` 컬럼(`@db.Date`)에 들어가거나 그 컬럼과 비교되는데, 어댑터가 그 컬럼용 값을 `getUTCFullYear`/`getUTCMonth`/`getUTCDate`로 직렬화하기 때문이다. **어긋난 값을 넘기면 하루 밀려 저장된다** — 한국 시간대에서 `new Date(2026, 7, 1).toISOString()`은 `2026-07-31T15:00:00.000Z`이고 저장되는 날짜는 `2026-07-31`이다. 예외가 하나도 나지 않아서 매일 반복 할 일이 하루 일찍 시작되고 어떤 테스트도 잡지 못한다. 그래서 **Service가 네 자리 각각에서 UTC 자정인지 확인하고**, 어긋나면 `BadRequestException`으로 거절한다(`assertLocalDateKey`).
+**UTC 자정이어야 하는 자리** — 이력 조회 범위(`TodoHistoryRange.from`·`until`)다. 이 값들은 `date` 컬럼(`@db.Date`)과 비교되는데, 어댑터가 그 컬럼용 값을 `getUTCFullYear`/`getUTCMonth`/`getUTCDate`로 직렬화하기 때문이다. **어긋난 값을 넘기면 하루 밀려 비교된다** — 한국 시간대에서 `new Date(2026, 7, 1).toISOString()`은 `2026-07-31T15:00:00.000Z`이고 비교되는 날짜는 `2026-07-31`이다. 예외가 하나도 나지 않아서 어긋난 기간의 기록이 돌아오고 어떤 테스트도 잡지 못한다. 그래서 **Service가 두 자리 각각에서 UTC 자정인지 확인하고**, 어긋나면 `BadRequestException`으로 거절한다(`assertLocalDateKey`).
 
-**순간을 가리키는 자리** — 수행 시각(`SaveProgressInput.performedAt`, `completeTodo`·`uncompleteTodo`의 `performedAt`), 기준 순간(`listDailyOn`의 `at`), 예정일(`CreateTodoInput.shouldDoAt`)이다. 이쪽은 날짜가 아니라 순간이라 자정일 필요가 없다. 수행 시각은 유저마다 하루가 바뀌는 자리가 달라서 "며칠인지"를 서버가 계산해야 하고, 예정일은 시각 컬럼(`Timestamptz`)이라 시·분이 그대로 저장된다.
+**순간을 가리키는 자리** — 수행 시각(`SaveProgressInput.performedAt`, `completeTodo`·`uncompleteTodo`의 `performedAt`), 기준 순간(`listDailyOn`의 `at`), 예정일(`CreateTodoInput.shouldDoAt`), 그리고 활성 기간(`CreateTodoInput.activeFrom`·`activeUntil`, `UpdateTodoInput`의 같은 두 필드)이다. 이쪽은 날짜가 아니라 순간이라 자정일 필요가 없다. 수행 시각은 유저마다 하루가 바뀌는 자리가 달라서 "며칠인지"를 서버가 계산해야 하고, 예정일과 활성 기간은 시각 컬럼(`Timestamptz`)이라 시·분이 그대로 저장된다. (활성 기간은 원래 UTC 자정 자리였다가 순간이 됐다 — 서버가 시간 처리를 하지 않고 클라이언트가 해석한다는 전제가 확정되면서다.)
 
 #### 그 `Date`를 만드는 것은 부르는 쪽의 책임이다
 
@@ -60,9 +60,9 @@ Service는 그 셋을 HTTP 예외로 바꾼다. `null`은 `NotFoundException`으
 
 `new Date('2026-08-01')`이 마침 UTC 자정으로 파싱되는 것에 기대지 마라. 그 동작은 문자열 형식에 따라 갈리고(`'2026-8-1'`은 구현 정의 동작으로 로컬 시각이 된다), 달력에 없는 날짜를 조용히 넘긴다.
 
-**Repository의 날짜 인자는 셋 다 `Date`다**(`findDailyActiveOn`·`findByTodoIdAndHistoriedOn`·`findDailyHistoriesOn`의 `historiedOn`, `findByTodoIdBetween`의 `from`·`until`). 이미 만들어진 날짜 키를 받는 자리이고, 만드는 것은 `src/todos/todo-local-date.ts`의 함수들이다 — `toHistoriedOn`(기록 날짜), `toLocalDateKey`(그 순간이 유저에게 며칠인지), `parseLocalDateKey`(사용자가 고른 날짜).
+**Repository의 날짜 인자는 전부 `Date`다**(`findDailyActiveAt`·`findByTodoIdAndHistoriedOn`·`findDailyHistoriesOn`의 `historiedOn`, `findByTodoIdBetween`의 `from`·`until`). 이미 만들어진 날짜 키를 받는 자리이고, 만드는 것은 `src/todos/todo-local-date.ts`의 함수들이다 — `toHistoriedOn`(기록 날짜), `toLocalDateKey`(그 순간이 유저에게 며칠인지), `parseLocalDateKey`(사용자가 고른 날짜). `findDailyActiveAt`의 `at`은 날짜 키가 아니라 **순간 그대로**다.
 
-**밖으로 내보낼 때는 다시 문자열이다.** `activeFrom`·`activeUntil`·`TodoHistoryItem.historiedOn`이 `YYYY-MM-DD` 문자열로 나간다. `Date`를 그대로 내보내면 받는 쪽이 자기 로컬 타임존으로 해석하는데, UTC 자정은 음수 오프셋 지역에서 전날 오후라 8월 1일 시작인 할 일이 7월 31일 시작으로 보인다.
+**밖으로 내보낼 때 날짜 키는 다시 문자열이다.** `TodoHistoryItem.historiedOn`이 `YYYY-MM-DD` 문자열로 나간다. `Date`를 그대로 내보내면 받는 쪽이 자기 로컬 타임존으로 해석하는데, UTC 자정은 음수 오프셋 지역에서 전날 오후라 8월 1일의 기록이 7월 31일 기록으로 보인다. (활성 기간은 순간이 되면서 `shouldDoAt`처럼 `Date` 그대로 나간다 — 시간 해석은 클라이언트의 몫이다.)
 
 내보내는 변환(`formatLocalDateKey`)은 **UTC 자정이 아닌 `Date`를 거절하고 `RangeError`를 던진다.** 시각 컬럼을 실수로 넘기면 UTC 기준 날짜가 나오는데 그 값은 유저 타임존 기준 날짜와 어긋나기 때문이다 — 한국 시간대 오전에 완료한 기록은 UTC로도 같은 날이라 맞아 보이다가 저녁에 완료한 기록에서만 하루 어긋난다. **그 `RangeError`는 조회 어디서도 잡히지 않아 그대로 새어 500 Internal Server Error가 된다.** 날짜 컬럼(`@db.Date`)에서 읽은 값은 UTC 자정으로 돌아오므로 정상 경로에서는 나오지 않는다.
 
@@ -120,9 +120,11 @@ Service는 그 셋을 HTTP 예외로 바꾼다. `null`은 `NotFoundException`으
 | `todoType`이 `GENERAL`인데 목표치나 단위가 있다        | `이 종류의 할 일에는 목표치를 둘 수 없다 (todoType=…)` |
 | `completeType`이 `ONCE`인데 활성 기간이 있다           | `일회성 할 일에는 활성 기간을 둘 수 없다`              |
 | `completeType`이 `DAILY`인데 예정일이 있다             | `매일 반복 할 일에는 예정일을 둘 수 없다`              |
-| 활성 시작일이 활성 종료일보다 늦다                    | `활성 기간의 시작일이 종료일보다 늦다`                 |
+| 활성 시작 순간이 활성 종료 순간보다 늦다              | `활성 기간의 시작일이 종료일보다 늦다`                 |
 
-목표치는 값과 단위가 **한 쌍**이다. 값만 있으면 화면이 무엇의 수량인지 말할 수 없고 단위만 있으면 채울 목표가 없어서, 개수를 세어 0이나 2만 허용한다. 일회성에 활성 기간을 두지 못하게 하는 것은 일회성 목록이 날짜로 거르지 않아 **저장해도 아무것도 하지 않기** 때문이다 — 조용히 무시하면 사용자는 기간이 걸린 줄 알고 기다린다. 뒤집힌 활성 기간을 막는 것도 오류 없이 "만들었는데 보이지 않는" 상태가 되는 쪽이라서다.
+목표치는 값과 단위가 **한 쌍**이다. 값만 있으면 화면이 무엇의 수량인지 말할 수 없고 단위만 있으면 채울 목표가 없어서, 개수를 세어 0이나 2만 허용한다. 일회성에 활성 기간을 두지 못하게 하는 것은 일회성 목록이 활성 기간으로 거르지 않아 **저장해도 아무것도 하지 않기** 때문이다 — 조용히 무시하면 사용자는 기간이 걸린 줄 알고 기다린다. 뒤집힌 활성 기간을 막는 것도 오류 없이 "만들었는데 보이지 않는" 상태가 되는 쪽이라서다.
+
+활성 기간의 형식 검증은 없다. 순간 컬럼(`Timestamptz`)이라 `shouldDoAt`과 같은 취급이고, 자정 여부도 유효한 `Date`인지도 이 계층이 보지 않는다 — 시간 해석은 클라이언트의 몫이다(사용자 확정).
 
 ### `listOnce`
 
@@ -142,18 +144,17 @@ listOnce(userId: bigint): Promise<TodoListItem[]>
 | -------- | ----------------- | -------- | --------------------------------------------------------------------------- |
 | (반환값) | `TodoListItem[]` | 아니오   | 오래 만든 것부터. 없으면 빈 배열이다. 필드는 [TodoListItem](#todolistitem) |
 
-던지는 예외가 없다. 다만 아래 둘이 그대로 새어 나가 500 Internal Server Error가 된다.
+던지는 예외가 없다. 다만 아래가 그대로 새어 나가 500 Internal Server Error가 된다.
 
 | 예외                              | 언제                                                                                                                |
 | --------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
 | Prisma 오류                       | 데이터베이스 접근이 실패했을 때                                                                                     |
-| `RangeError`(`formatLocalDateKey`) | 날짜 컬럼에서 읽은 값이 UTC 자정이 아닐 때. 정상 경로에서는 나오지 않는다 — `@db.Date` 컬럼이 UTC 자정으로 돌아온다 |
 
 ### `listDailyOn`
 
-주어진 순간이 유저에게 **며칠인지**를 계산해, 그날 활성인 매일 반복 할 일을 돌려준다. 어제 하지 않은 것이 오늘로 밀려오지 않는다 — 그날 기준으로 다시 시작한다.
+그 순간에 활성인 매일 반복 할 일을, 그 순간이 유저에게 **며칠인지**에 해당하는 완료 기록과 함께 돌려준다. 어제 하지 않은 것이 오늘로 밀려오지 않는다 — 그날 기준으로 다시 시작한다.
 
-활성 기간은 시작일과 종료일 **양쪽을 포함**하고, 비어 있으면 그쪽 제한이 없다는 뜻이다.
+**하나의 순간이 두 가지로 쓰인다.** 활성 판정에는 그대로(`activeFrom <= at <= activeUntil`, 사용자 확정 — 서버가 시간 처리를 하지 않는다), 붙일 기록을 찾는 데는 유저 타임존 기준 날짜로 바꿔서 쓴다. 활성 기간은 양 끝을 포함하고, 비어 있으면 그쪽 제한이 없다는 뜻이다.
 
 ```ts
 listDailyOn(userId: bigint, at: Date): Promise<TodoListItem[]>
@@ -162,17 +163,16 @@ listDailyOn(userId: bigint, at: Date): Promise<TodoListItem[]>
 | 이름     | 타입     | required | 설명                                                                                                       |
 | -------- | -------- | -------- | ---------------------------------------------------------------------------------------------------------- |
 | `userId` | `bigint` | 예       | 요청자의 유저 식별자                                                                                       |
-| `at`     | `Date`   | 예       | 기준 순간(보통 요청이 도착한 시각). 날짜가 아니라 순간이다 — 유저마다 하루가 바뀌는 자리가 달라서 그렇다 |
+| `at`     | `Date`   | 예       | 기준 순간(보통 요청이 도착한 시각). 활성 판정과 기록 날짜 계산이 둘 다 이 값에서 나온다                    |
 
 | 이름     | 타입              | nullable | 설명                                                                          |
 | -------- | ----------------- | -------- | ----------------------------------------------------------------------------- |
-| (반환값) | `TodoListItem[]` | 아니오   | 그날 활성인 것만. 없으면 빈 배열이다. 필드는 [TodoListItem](#todolistitem) |
+| (반환값) | `TodoListItem[]` | 아니오   | 그 순간 활성인 것만. 없으면 빈 배열이다. 필드는 [TodoListItem](#todolistitem) |
 
 | 예외                             | 언제                                                                                                             |
 | -------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
 | `NotFoundException`              | 타임존을 읽을 유저가 없거나 탈퇴했을 때. 메시지는 `그런 유저가 없다 (userId=…)`이고 **둘을 구분하지 않는다**      |
 | `RangeError`(`toLocalDateKey`)    | `at`이 유효하지 않은 `Date`일 때, 또는 저장된 타임존이 알 수 없는 이름일 때. **그대로 새어 500이 된다**           |
-| `RangeError`(`formatLocalDateKey`) | 활성 기간 컬럼에서 읽은 값이 UTC 자정이 아닐 때. 정상 경로에서는 나오지 않는다                                    |
 | Prisma 오류                       | 데이터베이스 접근이 실패했을 때                                                                                  |
 
 ### `getTodo`
@@ -228,12 +228,11 @@ createTodo(userId: bigint, input: CreateTodoInput): Promise<TodoListItem>
 
 | 예외                  | 언제                                                                                                  |
 | --------------------- | ----------------------------------------------------------------------------------------------------- |
-| `BadRequestException`  | 활성 기간 날짜가 유효하지 않은 `Date`거나 UTC 자정이 아닐 때. 어느 자리인지를 메시지에 담는다         |
 | `BadRequestException`  | 위 [만들기와 고치기가 함께 통과하는 규칙](#만들기와-고치기가-함께-통과하는-규칙) 다섯 중 하나에 걸릴 때 |
 | Prisma 오류(`P2003`)   | `userId`에 해당하는 유저 행이 없을 때. 참조 대상이 없다는 뜻의 외래키 위반이다                        |
 | Prisma 오류            | 그 밖에 데이터베이스 접근이 실패했을 때                                                               |
 
-**거절되면 만들지 않는다.** 날짜 검사와 규칙 검사가 저장보다 앞이다.
+**거절되면 만들지 않는다.** 규칙 검사가 저장보다 앞이다.
 
 ### `updateTodo`
 
@@ -261,7 +260,6 @@ updateTodo(userId: bigint, todoId: bigint, input: UpdateTodoInput): Promise<void
 | --------------------- | ----------------------------------------------------------------------------------------------------------- |
 | `NotFoundException`    | 그런 할 일이 없거나 남의 것이거나 이미 지워졌을 때 (고치기 전에 읽는 단계에서 걸린다)                       |
 | `NotFoundException`    | 읽은 뒤 쓰기 사이에 그 할 일이 지워졌을 때. Prisma의 `P2025`(고칠 행을 찾지 못했다)를 바꾼 것이다            |
-| `BadRequestException`  | 활성 기간 날짜가 유효하지 않은 `Date`거나 UTC 자정이 아닐 때                                                |
 | `BadRequestException`  | **바뀐 뒤의 형태**가 위 다섯 규칙 중 하나에 걸릴 때                                                         |
 | Prisma 오류            | `P2025` 밖의 오류는 바꾸지 않고 그대로 올린다                                                               |
 
@@ -519,22 +517,25 @@ findOnceWithoutCompletedHistory(userId: bigint): Promise<TodoTemplateWithHistori
 
 **붙는 기록이 최대 1개인 근거가 저장 경로의 규약에 있고, 깨질 수 있다.** `(todoId, historiedOn)` 유일 제약이 같은 조합을 하나로 제한하고 일회성의 그 날짜가 정의당 하나로 고정되므로 결과적으로 하나가 된다. 깨지는 조건은 하나다 — **저장 경로가 `toHistoriedOn`을 거치지 않고 다른 날짜를 넣으면** 여러 행이 생기고, 그때 첫 항목만 읽는 코드는 어느 것이 잡히는지 정해지지 않는다.
 
-### `findDailyActiveOn`
+### `findDailyActiveAt`
 
-주어진 날짜에 **활성인** 매일 반복 할 일과 그날의 완료 기록을 돌려준다. 조건이 "그날 활성인가"일 뿐이고 기록이 있는지는 조건이 아니다 — 어제 하지 않아 기록이 없어도 오늘은 오늘대로 나온다.
+주어진 순간에 **활성인** 매일 반복 할 일과 그날의 완료 기록을 돌려준다. 조건이 "그 순간 활성인가"일 뿐이고 기록이 있는지는 조건이 아니다 — 어제 하지 않아 기록이 없어도 오늘은 오늘대로 나온다.
 
-활성 기간은 시작일과 종료일 **양쪽을 포함**하고, 값이 비어 있으면 그쪽 제한이 없다는 뜻이다.
+**활성 판정은 요청 순간과 활성 기간을 그대로 비교한다**(`activeFrom <= at <= activeUntil`, 사용자 확정 — 서버가 시간 처리를 하지 않는다). 양 끝을 포함하고, 값이 비어 있으면 그쪽 제한이 없다는 뜻이다.
+
+**판정하는 값과 기록을 찾는 값이 다르다.** 활성은 순간(`at`)으로 판정하고 붙여 줄 기록은 유저 타임존 기준 날짜(`historiedOn`)로 찾는다 — 기록의 키가 날짜 컬럼이기 때문이다.
 
 **완료 여부를 판정하지 않는다.** 기록을 붙여 주기만 하고 완료 시각을 읽지 않는다 — 그 차이가 이 계층과 Service의 경계다.
 
 ```ts
-findDailyActiveOn(userId: bigint, historiedOn: Date): Promise<TodoTemplateWithHistories[]>
+findDailyActiveAt(userId: bigint, at: Date, historiedOn: Date): Promise<TodoTemplateWithHistories[]>
 ```
 
 | 이름          | 타입     | required | 설명                                                                                             |
 | ------------- | -------- | -------- | ------------------------------------------------------------------------------------------------ |
 | `userId`      | `bigint` | 예       | 소유자 식별자. 쿼리 조건으로 쓴다                                                                |
-| `historiedOn` | `Date`   | 예       | 유저 타임존 기준 날짜. **`toLocalDateKey`로 만든 UTC 자정 `Date`다** — 손으로 만들면 하루 밀린다 |
+| `at`          | `Date`   | 예       | 활성 판정의 기준 순간(보통 요청이 도착한 시각). 날짜 키가 아니라 순간 그대로다                    |
+| `historiedOn` | `Date`   | 예       | 붙여 줄 기록의 유저 타임존 기준 날짜. **`toLocalDateKey`로 만든 UTC 자정 `Date`다** — 손으로 만들면 하루 밀린다 |
 
 | 이름     | 타입                           | nullable | 설명                                                                                                                       |
 | -------- | ------------------------------ | -------- | -------------------------------------------------------------------------------------------------------------------------- |
@@ -652,7 +653,7 @@ findByTodoIdBetween(userId: bigint, todoId: bigint, from: Date, until: Date): Pr
 
 일회성을 이 계층에서 걸러 내는 이유가 있다. 일회성의 `historiedOn`은 화면에 보여 줄 날짜가 아니라 중복을 막는 열쇠라서 날짜별 목록에 섞이면 안 되는데, **완료 기록에는 반복 방식이 저장되지 않으므로** 결과를 받은 쪽에서 걸러 낼 방법이 없다. 그래서 쿼리 조건으로 못 박았다.
 
-**이 메서드를 부르는 프로덕션 코드가 지금 없다.** 매일 반복 목록이 `findDailyActiveOn`으로 정의와 기록을 함께 받기 때문이다. 지우지 않고 남긴 상태이고, `test/todos.e2e-spec.ts`가 부르고 있다.
+**이 메서드를 부르는 프로덕션 코드가 지금 없다.** 매일 반복 목록이 `findDailyActiveAt`으로 정의와 기록을 함께 받기 때문이다. 지우지 않고 남긴 상태이고, `test/todos.e2e-spec.ts`가 부르고 있다.
 
 ```ts
 findDailyHistoriesOn(userId: bigint, historiedOn: Date): Promise<TodoHistory[]>
@@ -719,8 +720,8 @@ findTimeZone(userId: bigint): Promise<string | null>
 | `shouldDoAt`   | `Date \| null`   | 아니오   | 일회성의 예정일. 시각 컬럼(`Timestamptz`)이라 `Date`다. **매일 반복에는 둘 수 없다**         |
 | `targetValue`  | `number \| null` | 아니오   | 목표치. `targetUnit`과 **한 쌍**이다                                                        |
 | `targetUnit`   | `string \| null` | 아니오   | 목표치의 단위(`회`·`분`처럼). 16자까지다                                                    |
-| `activeFrom`   | `Date \| null`   | 아니오   | 매일 반복의 활성 시작일(**UTC 자정**, 그날 **포함**). **일회성에는 둘 수 없다**              |
-| `activeUntil`  | `Date \| null`   | 아니오   | 활성 종료일(**UTC 자정**, 그날 **포함**). 비어 있으면 기한이 없다                           |
+| `activeFrom`   | `Date \| null`   | 아니오   | 매일 반복의 활성 시작 순간(그 순간 **포함**). 자정일 필요가 없다. **일회성에는 둘 수 없다**   |
+| `activeUntil`  | `Date \| null`   | 아니오   | 활성 종료 순간(그 순간 **포함**). 비어 있으면 기한이 없다                                   |
 
 값을 주지 않은 옵셔널 필드는 `null`로 저장된다 — Service가 `?? null`로 못 박아 무엇이 저장되는지가 코드에 드러난다.
 
@@ -738,8 +739,8 @@ findTimeZone(userId: bigint): Promise<string | null>
 | `shouldDoAt`  | `Date \| null`   | 아니오   | 일회성의 예정일                                         |
 | `targetValue` | `number \| null` | 아니오   | 목표치                                                  |
 | `targetUnit`  | `string \| null` | 아니오   | 목표치의 단위                                           |
-| `activeFrom`  | `Date \| null`   | 아니오   | 활성 시작일(**UTC 자정**)                               |
-| `activeUntil` | `Date \| null`   | 아니오   | 활성 종료일(**UTC 자정**)                               |
+| `activeFrom`  | `Date \| null`   | 아니오   | 활성 시작 순간. 자정일 필요가 없다                       |
+| `activeUntil` | `Date \| null`   | 아니오   | 활성 종료 순간. 자정일 필요가 없다                       |
 
 #### SaveProgressInput
 
@@ -783,8 +784,8 @@ findTimeZone(userId: bigint): Promise<string | null>
 | `shouldDoAt`   | `Date \| string \| null`                                  | 아니오   | 예정일. Prisma가 문자열도 받지만 Service는 `Date`를 넘긴다              |
 | `targetValue`  | `Prisma.Decimal \| DecimalJsLike \| number \| string \| null` | 아니오   | 목표치. 컬럼이 `numeric(12, 2)`다                                       |
 | `targetUnit`   | `string \| null`                                          | 아니오   | 목표치의 단위                                                           |
-| `activeFrom`   | `Date \| string \| null`                                  | 아니오   | 활성 시작일. **`parseLocalDateKey`로 만든 UTC 자정 `Date`를 넘긴다**    |
-| `activeUntil`  | `Date \| string \| null`                                  | 아니오   | 활성 종료일                                                             |
+| `activeFrom`   | `Date \| string \| null`                                  | 아니오   | 활성 시작 순간. 순간 컬럼(`timestamptz`)이라 그대로 저장된다            |
+| `activeUntil`  | `Date \| string \| null`                                  | 아니오   | 활성 종료 순간                                                          |
 
 #### UpdateTodoTemplateInput
 
@@ -805,8 +806,8 @@ findTimeZone(userId: bigint): Promise<string | null>
 | `shouldDoAt`  | `Date \| string \| null` 또는 갱신 연산 객체 | 아니오 | 예정일          |
 | `targetValue` | `Prisma.Decimal \| number \| string \| null` 또는 갱신 연산 객체 | 아니오 | 목표치 |
 | `targetUnit`  | `string \| null` 또는 갱신 연산 객체 | 아니오 | 목표치의 단위              |
-| `activeFrom`  | `Date \| string \| null` 또는 갱신 연산 객체 | 아니오 | 활성 시작일     |
-| `activeUntil` | `Date \| string \| null` 또는 갱신 연산 객체 | 아니오 | 활성 종료일     |
+| `activeFrom`  | `Date \| string \| null` 또는 갱신 연산 객체 | 아니오 | 활성 시작 순간   |
+| `activeUntil` | `Date \| string \| null` 또는 갱신 연산 객체 | 아니오 | 활성 종료 순간   |
 
 **막는 것은 데이터베이스 제약이 아니라 TypeScript 타입이다.** 위 두 입력 타입의 `Omit`이 사라지면 컴파일만 실패하고 데이터베이스는 조용히 허용한다 — `test/todos.e2e-spec.ts`가 네 가지 금지(`todoType`·`completeType`·중첩 삽입·중첩 삭제)의 컴파일 오류가 실제로 나는지를 붙잡아 둔다.
 
@@ -855,8 +856,8 @@ findTimeZone(userId: bigint): Promise<string | null>
 | `shouldDoAt`  | `Date \| null`   | 예       | 일회성의 예정일. 시각이라 문자열로 줄이지 않는다                                           |
 | `targetValue` | `number \| null` | 예       | **현재** 목표치. `Prisma.Decimal`을 `number`로 바꾼 값이다 — 기록에 복사된 값과 다를 수 있다 |
 | `targetUnit`  | `string \| null` | 예       | 현재 단위                                                                                  |
-| `activeFrom`  | `string \| null` | 예       | 활성 시작일(`YYYY-MM-DD`). `null`은 제한 없음이다                                          |
-| `activeUntil` | `string \| null` | 예       | 활성 종료일(`YYYY-MM-DD`)                                                                  |
+| `activeFrom`  | `Date \| null`   | 예       | 활성 시작 순간. `null`은 제한 없음이다. 순간이라 `Date` 그대로 나간다 — 해석은 클라이언트의 몫이다 |
+| `activeUntil` | `Date \| null`   | 예       | 활성 종료 순간                                                                             |
 
 **`userId`와 `deletedAt`이 없다.** 자기 것만 조회하므로 소유자 번호는 쓸 데가 없고, 응답에 다른 유저의 번호가 새는 경로를 구조적으로 없앤다.
 
@@ -950,8 +951,8 @@ findTimeZone(userId: bigint): Promise<string | null>
 | `shouldDoAt`   | `Date \| null`            | 예       | 예정일. 시각 컬럼(`Timestamptz`)이다                       |
 | `targetValue`  | `Prisma.Decimal \| null`  | 예       | 목표치. `numeric(12, 2)` 컬럼이다                          |
 | `targetUnit`   | `string \| null`          | 예       | 목표치의 단위                                              |
-| `activeFrom`   | `Date \| null`            | 예       | 활성 시작일. **날짜 컬럼(`@db.Date`)이라 UTC 자정 `Date`다** |
-| `activeUntil`  | `Date \| null`            | 예       | 활성 종료일. 같은 성질이다                                 |
+| `activeFrom`   | `Date \| null`            | 예       | 활성 시작 순간. 순간 컬럼(`timestamptz(3)`)이라 시각이 보존된다 |
+| `activeUntil`  | `Date \| null`            | 예       | 활성 종료 순간. 같은 성질이다                              |
 | `createdAt`    | `Date`                     | 아니오   | 생성 시각. **일회성의 날짜 키가 이 값에서 나온다**         |
 | `updatedAt`    | `Date`                     | 아니오   | 마지막 수정 시각                                           |
 | `deletedAt`    | `Date \| null`            | 예       | 삭제 시각. 값이 있으면 삭제된 할 일이다                    |

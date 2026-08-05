@@ -76,7 +76,7 @@ export type TodoTemplateWithHistories = TodoTemplate & {
  * `todo_template` 테이블 접근.
  *
  * **판단하지 않고 조회 조건만 담는다.** "완료했는가"를 계산하거나 "무엇을 보여 줄지"를
- * 정하는 것은 위 계층(Service)의 몫이다 — `findDailyActiveOn`이 그날 기록을 붙여 주기만
+ * 정하는 것은 위 계층(Service)의 몫이다 — `findDailyActiveAt`이 그날 기록을 붙여 주기만
  * 하고 완료 여부를 따지지 않는 것이 그 경계를 보여 준다.
  *
  * **조회와 수정 모두 삭제되지 않은 행만 대상으로 한다.** 조회에서는 보이지 않는데 수정은
@@ -242,24 +242,33 @@ export class TodoTemplatesRepository {
   }
 
   /**
-   * 주어진 날짜에 **활성인** 매일 반복(DAILY) 할 일과 그날의 완료 기록.
+   * 주어진 순간에 **활성인** 매일 반복(DAILY) 할 일과 그날의 완료 기록.
    *
    * 사용자가 확정한 규칙: 어제 하지 않아 기록이 없으면 어제는 그대로 미완료로 남고,
    * 오늘은 오늘대로 다시 목록에 나온다. **밀린 일이 오늘로 넘어오지 않는다.** 그래서
-   * 조건이 "그날 활성인가"일 뿐이고 기록이 있는지는 조건이 아니다.
+   * 조건이 "그 순간 활성인가"일 뿐이고 기록이 있는지는 조건이 아니다.
    *
-   * 활성 기간은 시작일과 종료일 **양쪽을 포함**하고, 값이 비어 있으면 그쪽 제한이 없다는
-   * 뜻이다(시작일이 없으면 언제부터든, 종료일이 없으면 기한 없이).
+   * **활성 판정은 요청 순간과 활성 기간을 그대로 비교한다**(`activeFrom <= at <=
+   * activeUntil`, 사용자 확정). 서버는 그 두 값에 날짜 의미를 부여하지 않는다 — 시간
+   * 해석은 클라이언트의 몫이고, "그날 활성"이 아니라 "그 순간 활성"이다. 양 끝을
+   * 포함하고, 값이 비어 있으면 그쪽 제한이 없다는 뜻이다(시작이 없으면 언제부터든,
+   * 종료가 없으면 기한 없이).
+   *
+   * **판정하는 값과 기록을 찾는 값이 다르다.** 활성은 순간(`at`)으로 판정하고, 붙여 줄
+   * 기록은 유저 타임존 기준 날짜(`historiedOn`)로 찾는다 — 기록의 키가 날짜 컬럼이기
+   * 때문이다. 두 값은 보통 같은 요청 순간에서 나온다(Service의 `listDailyOn`).
    *
    * `histories`에는 그날 기록만 0개 또는 1개가 붙는다. 여기서는 근거가 더 단단하다 —
    * 날짜를 `where`로 못 박으므로 `@@unique([todoId, historiedOn])`이 **직접** 한 건을
    * 보장한다(일회성 목록은 날짜를 고정하지 못해 저장 경로의 규약에 의존한다).
    * **완료 여부를 판정하지 않는다** — 이 계층은 완료 시각을 읽지 않고 붙여 주기만 한다.
    *
-   * @param historiedOn 유저 타임존 기준 날짜. `toLocalDateKey`로 만든다
+   * @param at 활성 판정의 기준 순간(보통 요청이 도착한 시각)
+   * @param historiedOn 붙여 줄 기록의 유저 타임존 기준 날짜. `toLocalDateKey`로 만든다
    */
-  async findDailyActiveOn(
+  async findDailyActiveAt(
     userId: bigint,
+    at: Date,
     historiedOn: Date,
   ): Promise<TodoTemplateWithHistories[]> {
     return this.prisma.todoTemplate.findMany({
@@ -268,10 +277,8 @@ export class TodoTemplatesRepository {
         deletedAt: null,
         completeType: 'DAILY',
         AND: [
-          { OR: [{ activeFrom: null }, { activeFrom: { lte: historiedOn } }] },
-          {
-            OR: [{ activeUntil: null }, { activeUntil: { gte: historiedOn } }],
-          },
+          { OR: [{ activeFrom: null }, { activeFrom: { lte: at } }] },
+          { OR: [{ activeUntil: null }, { activeUntil: { gte: at } }] },
         ],
       },
       include: {
