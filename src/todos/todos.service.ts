@@ -192,18 +192,24 @@ export class TodosService {
   }
 
   /**
-   * 그 순간이 유저에게 **며칠인지**를 계산해, 그날 활성인 매일 반복 할 일을 돌려준다.
+   * 그 순간에 활성인 매일 반복 할 일을, 그 순간이 유저에게 **며칠인지**의 기록과
+   * 함께 돌려준다.
    *
    * 어제 하지 않은 것이 오늘로 밀려오지 않는다 — 그날 기준으로 다시 시작한다.
    *
-   * @param at 기준 순간(보통 요청이 도착한 시각). 날짜가 아니라 순간이다 — 유저마다
-   *   하루가 바뀌는 자리가 달라서 날짜를 정하는 것이 이 메서드의 일이다
+   * **`at` 하나가 두 값으로 갈라진다.** 활성 판정(`activeFrom <= at < activeUntil`)은
+   * 순간 그대로 쓰고, 그날 기록을 붙일 열쇠는 유저 타임존 기준 날짜 키로 바꾼다 —
+   * 두 값이 다른 순간에서 나오면 "활성인 목록"과 "그날의 기록"이 서로 다른 시점을
+   * 말하게 되므로, 같은 `at`에서 만드는 것이 이 메서드의 일이다.
+   *
+   * @param at 기준 순간(보통 요청이 도착한 시각)
    * @throws {NotFoundException} 그 유저가 없거나 탈퇴했을 때
    */
   async listDailyOn(userId: bigint, at: Date): Promise<TodoListItem[]> {
     const timeZone = await this.readTimeZone(userId);
     const rows = await this.templates.findDailyActiveOn(
       userId,
+      at,
       toLocalDateKey(at, timeZone),
     );
 

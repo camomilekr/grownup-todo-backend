@@ -242,24 +242,37 @@ export class TodoTemplatesRepository {
   }
 
   /**
-   * 주어진 날짜에 **활성인** 매일 반복(DAILY) 할 일과 그날의 완료 기록.
+   * 주어진 순간에 **활성인** 매일 반복(DAILY) 할 일과 그날의 완료 기록.
    *
    * 사용자가 확정한 규칙: 어제 하지 않아 기록이 없으면 어제는 그대로 미완료로 남고,
    * 오늘은 오늘대로 다시 목록에 나온다. **밀린 일이 오늘로 넘어오지 않는다.** 그래서
-   * 조건이 "그날 활성인가"일 뿐이고 기록이 있는지는 조건이 아니다.
+   * 조건이 "그 순간에 활성인가"일 뿐이고 기록이 있는지는 조건이 아니다.
    *
-   * 활성 기간은 시작일과 종료일 **양쪽을 포함**하고, 값이 비어 있으면 그쪽 제한이 없다는
-   * 뜻이다(시작일이 없으면 언제부터든, 종료일이 없으면 기한 없이).
+   * 활성 판정은 **반열림 구간**이다 — `activeFrom <= at < activeUntil`. 시작 순간은
+   * 포함되고 상한 순간은 포함되지 않으며, 값이 비어 있으면 그쪽 제한이 없다는 뜻이다
+   * (시작이 없으면 언제부터든, 상한이 없으면 기한 없이). 상한이 미포함인 이유는
+   * 순간에 "그날의 끝"이 없기 때문이다 — 포함으로 두면 "8월 31일까지"를
+   * `23:59:59.999…` 같은 정밀도에 얽힌 값으로 표현해야 하고, 미포함 상한이면 다음 날
+   * 자정 하나로 끝난다.
+   *
+   * **순간과 날짜 키를 따로 받는다.** 활성 판정은 순간 컬럼(`Timestamptz`)과의
+   * 비교라 순간 그대로 쓰고, 붙여 줄 기록은 날짜 컬럼(`@db.Date`)이 열쇠라 유저
+   * 타임존 기준 날짜 키가 필요하다 — 하나로 받아 여기서 변환하면 타임존을 이
+   * 계층이 알아야 해서 판단이 계층을 넘는다. 같은 순간에서 나온 두 값을 넘기는
+   * 것은 부르는 쪽(Service)의 책임이다.
    *
    * `histories`에는 그날 기록만 0개 또는 1개가 붙는다. 여기서는 근거가 더 단단하다 —
    * 날짜를 `where`로 못 박으므로 `@@unique([todoId, historiedOn])`이 **직접** 한 건을
    * 보장한다(일회성 목록은 날짜를 고정하지 못해 저장 경로의 규약에 의존한다).
    * **완료 여부를 판정하지 않는다** — 이 계층은 완료 시각을 읽지 않고 붙여 주기만 한다.
    *
-   * @param historiedOn 유저 타임존 기준 날짜. `toLocalDateKey`로 만든다
+   * @param at 활성 판정의 기준 순간(보통 요청이 도착한 시각)
+   * @param historiedOn 그날 기록을 붙일 유저 타임존 기준 날짜. `toLocalDateKey`로
+   *   `at`에서 만든다
    */
   async findDailyActiveOn(
     userId: bigint,
+    at: Date,
     historiedOn: Date,
   ): Promise<TodoTemplateWithHistories[]> {
     return this.prisma.todoTemplate.findMany({
@@ -268,9 +281,9 @@ export class TodoTemplatesRepository {
         deletedAt: null,
         completeType: 'DAILY',
         AND: [
-          { OR: [{ activeFrom: null }, { activeFrom: { lte: historiedOn } }] },
+          { OR: [{ activeFrom: null }, { activeFrom: { lte: at } }] },
           {
-            OR: [{ activeUntil: null }, { activeUntil: { gte: historiedOn } }],
+            OR: [{ activeUntil: null }, { activeUntil: { gt: at } }],
           },
         ],
       },

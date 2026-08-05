@@ -204,19 +204,23 @@ describe('TodosService', () => {
   });
 
   describe('listDailyOn', () => {
-    it('유저 타임존 기준 날짜로 조회한다', async () => {
+    it('활성 판정에는 순간을, 기록에는 유저 타임존 기준 날짜를 넘긴다', async () => {
       // 한국 시간대 자정 직전이다. UTC로는 8월 1일이지만 유저가 보는 날짜는 8월 2일이다.
+      // 활성 판정용 순간은 변환 없이 그대로 넘어가야 한다 — 날짜 키로 뭉개면
+      // 자정 직전과 직후가 같은 값이 되어 반열림 경계가 사라진다.
+      const at = new Date('2026-08-01T15:00:00.000Z');
       templates.findDailyActiveOn.mockResolvedValue([]);
 
-      await service.listDailyOn(USER_ID, new Date('2026-08-01T15:00:00.000Z'));
+      await service.listDailyOn(USER_ID, at);
 
       expect(templates.findDailyActiveOn).toHaveBeenCalledWith(
         USER_ID,
+        at,
         parseLocalDateKey('2026-08-02'),
       );
     });
 
-    it('같은 순간이라도 타임존이 다르면 다른 날짜를 조회한다', async () => {
+    it('같은 순간이라도 타임존이 다르면 다른 날짜의 기록을 조회한다', async () => {
       // 날짜 경계가 유저 설정으로 정해진다는 것을 고정한다.
       users.findTimeZone.mockResolvedValue('America/New_York');
       templates.findDailyActiveOn.mockResolvedValue([]);
@@ -225,6 +229,7 @@ describe('TodosService', () => {
 
       expect(templates.findDailyActiveOn).toHaveBeenCalledWith(
         USER_ID,
+        new Date('2026-08-01T15:00:00.000Z'),
         parseLocalDateKey('2026-08-01'),
       );
     });

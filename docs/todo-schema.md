@@ -1,6 +1,6 @@
 # todo 스키마
 
-> 기준: `prisma/schema.prisma` · 마이그레이션 `20260731075406_init_todo_entities`(테이블 생성)와 `20260731164011_fix_todo_history_user_id_comment`(컬럼 코멘트 수정)
+> 기준: `prisma/schema.prisma` · 마이그레이션 `20260731075406_init_todo_entities`(테이블 생성), `20260731164011_fix_todo_history_user_id_comment`(컬럼 코멘트 수정), `20260805123230_active_period_timestamptz`(활성 기간을 순간으로)
 
 ## 전체 그림부터
 
@@ -86,8 +86,8 @@ appUser ──┬─< todoTemplate ──< todoHistory
 | `shouldDoAt` | `should_do_at` | `timestamptz(3)` | false | | 언제까지 해야 하는지. **일회성 전용** |
 | `targetValue` | `target_value` | `numeric(12,2)` | false | | 목표 수치. 일반 타입에서는 비어 있다 |
 | `targetUnit` | `target_unit` | `varchar(16)` | false | | 목표 수치의 단위 ("걸음", "잔") |
-| `activeFrom` | `active_from` | `date` | false | | 반복 시작일 (이 날 포함). **매일 반복 전용** |
-| `activeUntil` | `active_until` | `date` | false | | 반복 종료일 (이 날 포함). 비어 있으면 무기한 |
+| `activeFrom` | `active_from` | `timestamptz(3)` | false | | 활성 시작 순간 (이 순간 포함). **매일 반복 전용** |
+| `activeUntil` | `active_until` | `timestamptz(3)` | false | | 활성 상한 순간 (**이 순간 미포함**). 비어 있으면 무기한 |
 | `createdAt` | `created_at` | `timestamptz(3)` | true | 기본값 `now()` | 만든 일시 |
 | `updatedAt` | `updated_at` | `timestamptz(3)` | true | 자동 갱신 | 마지막으로 고친 일시 |
 | `deletedAt` | `deleted_at` | `timestamptz(3)` | false | | 삭제 일시. 행은 남겨 둔다 |
@@ -98,6 +98,14 @@ appUser ──┬─< todoTemplate ──< todoHistory
 |---|---|---|
 | UNIQUE | `(todo_id, user_id)` | `todoId`만으로도 행이 정해지므로 논리적으로는 중복이다. `todoHistory`가 이 두 컬럼을 묶어 참조하는데, Postgres가 그런 참조의 대상 쪽에 같은 조합의 유일 제약을 요구해서 둔다 |
 | INDEX | `(user_id, deleted_at)` | 목록 조회 두 가지가 모두 `userId`로 좁히고 삭제되지 않은 것만 보므로 함께 묶었다 |
+
+### 활성 기간은 순간이고 판정은 반열림이다
+
+`activeFrom`·`activeUntil`은 날짜(`date`)가 아니라 **순간**(`timestamptz(3)`)이고, 활성 판정은 `activeFrom <= 순간 < activeUntil`이다 — 시작 순간은 포함되고 상한 순간은 포함되지 않는다.
+
+상한을 미포함으로 정한 이유가 있다. 순간에는 "그날의 끝"이 없어서, 상한을 포함으로 두면 "8월 31일까지"를 `23:59:59.999…` 같은 하루의 마지막 순간으로 표현해야 하고 그 값은 정밀도에 따라 달라진다. 미포함 상한이면 다음 날 자정 하나로 끝나고, 이어지는 두 기간이 겹치지도 비지도 않는다.
+
+`timestamptz`는 이름과 달리 타임존을 저장하지 않는다 — 받은 값을 UTC로 정규화한 **순간 하나**를 저장한다. 그래서 같은 값이 유저마다 다른 벽시계 시각으로 읽히고, "그 순간에 활성인가"라는 질문의 답은 타임존과 무관하게 하나다.
 
 ### 종류와 반복 방식은 만든 뒤 바꿀 수 없다
 
@@ -184,7 +192,7 @@ appUser ──┬─< todoTemplate ──< todoHistory
 | | 조건 | 결과 |
 |---|---|---|
 | 일회성 | **완료된 기록**(완료 시각이 채워진, 취소되지 않은 기록)이 없는 것 전부. **날짜로 거르지 않는다** | 완료할 때까지 계속 나온다. 진행값만 입력한 상태도 목록에 남는다 |
-| 매일 반복 | 그날 활성 기간 안(양 끝 포함). 그날 기록을 0~1개 붙여 준다 | 어제 미완료는 어제로 남고 **오늘로 밀려오지 않는다** |
+| 매일 반복 | 요청 순간이 활성 기간 안(반열림: `activeFrom <= 순간 < activeUntil`). 그날 기록을 0~1개 붙여 준다 | 어제 미완료는 어제로 남고 **오늘로 밀려오지 않는다** |
 
 **완료 여부를 누가 판정하는지가 둘이 다르다.** 일회성의 "아직 완료 안 됨"은 **쿼리 조건 그 자체**라 DB에서 걸러진다. 매일 반복은 기록을 붙여 주기만 하고 **완료 판정은 위 계층(Service)에 남긴다.** 그 차이가 Repository와 Service의 경계다.
 
@@ -201,7 +209,7 @@ appUser ──┬─< todoTemplate ──< todoHistory
 | `email` | 소문자로 바꾸고 앞뒤 공백 제거 | 같은 사람이 계정 두 개를 갖는다 |
 | `time_zone` | IANA 타임존 이름인지 (`Intl.supportedValuesOf('timeZone')`) | **그 유저의 모든 날짜 계산이 계속 실패한다** |
 | `remind_at` | `HH:mm` 형식인지 (00~23시, 00~59분). 정규식은 표 아래에 | 알림 대상을 문자열 일치로 찾으므로 **오류 하나 없이 영영 알림이 가지 않는다** |
-| `active_from`·`active_until` | `parseLocalDateKey`로 만든 값 | 직접 만든 날짜는 **하루 밀려 저장된다** |
+| `active_from`·`active_until` | 유효한 `Date`인지 (`Invalid Date` 거절) | `Invalid Date`가 Prisma까지 새면 500이 된다 |
 | `todo_history.user_id` | **요청자의 식별자**를 넣는다 (표 아래 설명) | 소유자 검사와 묶음 외래키를 **둘 다 통과해** 남의 할 일에 기록이 쓰인다 |
 
 `todo_history.user_id`는 다른 넷과 성질이 다르다. 형식을 다듬는 문제가 아니라 **값을 어디서 가져오는가**의 문제이고, 어겼을 때 아무 오류도 나지 않는다.
