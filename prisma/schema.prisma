@@ -210,18 +210,14 @@ model TodoTemplate {
   targetValue Decimal? @map("target_value") @db.Decimal(12, 2)
   targetUnit  String?  @map("target_unit") @db.VarChar(16)
 
-  /// 매일 반복(DAILY) 할 일이 활성인 기간. 시작일과 종료일 **양쪽을 포함**한다.
-  /// 종료일이 비어 있으면 기한 없이 계속된다.
+  /// 매일 반복(DAILY) 할 일이 활성인 기간. 시작 순간과 종료 순간 **양쪽을 포함**한다.
+  /// 종료 순간이 비어 있으면 기한 없이 계속된다.
   ///
-  /// 시각이 아니라 날짜만 저장한다(`date` 타입). 기간 판정이 유저가 보는 날짜
-  /// 기준이라 시·분이 끼면 경계에서 어긋나기 때문이다.
-  ///
-  /// **여기에 넣을 값을 `new Date(2026, 7, 1)`처럼 직접 만들지 마라.** 그렇게 만든
-  /// 값은 한국 시간대에서 하루 앞으로 밀려 저장된다 — 이유는
-  /// `src/todos/todo-local-date.ts`에 있고, 그 파일의 `parseLocalDateKey('2026-08-01')`
-  /// 를 쓰면 안전하다.
-  activeFrom  DateTime? @map("active_from") @db.Date
-  activeUntil DateTime? @map("active_until") @db.Date
+  /// 날짜(`date`)가 아니라 순간(`timestamptz`)을 저장한다. 서버는 이 값에 날짜
+  /// 의미를 부여하지 않는다 — **시간 해석은 클라이언트의 몫이라는 전제**(사용자
+  /// 확정)이고, 활성 판정은 요청 순간과 이 두 값을 그대로 비교한다.
+  activeFrom  DateTime? @map("active_from") @db.Timestamptz(3)
+  activeUntil DateTime? @map("active_until") @db.Timestamptz(3)
 
   createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
   updatedAt DateTime  @updatedAt @map("updated_at") @db.Timestamptz(3)

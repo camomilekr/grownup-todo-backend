@@ -59,10 +59,9 @@ export type TodoHistoryRange = {
 /**
  * 할 일을 새로 만들 때 받는 값.
  *
- * 활성 기간은 날짜 컬럼(`@db.Date`)에 들어가므로 **UTC 자정 `Date`**여야 한다. 그 값을
- * 만드는 책임이 어디에 있는지는 `TodoHistoryRange` 주석에 있고 같은 규칙이다. 예정일
- * (`shouldDoAt`)은 시각 컬럼(`Timestamptz`)이라 자정일 필요가 없다 — 순간을 가리키는
- * 값이라 시·분이 그대로 저장된다.
+ * 예정일(`shouldDoAt`)과 활성 기간(`activeFrom`·`activeUntil`)은 모두 시각 컬럼
+ * (`Timestamptz`)이라 **순간을 가리키는 값이고 시·분이 그대로 저장된다.** 자정일 필요가
+ * 없고 이 계층이 형식을 검증하지도 않는다 — 시간 해석은 클라이언트의 몫이다(사용자 확정).
  */
 export type CreateTodoInput = {
   title: string;
@@ -192,18 +191,24 @@ export class TodosService {
   }
 
   /**
-   * 그 순간이 유저에게 **며칠인지**를 계산해, 그날 활성인 매일 반복 할 일을 돌려준다.
+   * 그 순간에 활성인 매일 반복 할 일을, 그 순간이 유저에게 **며칠인지**에 해당하는
+   * 완료 기록과 함께 돌려준다.
    *
    * 어제 하지 않은 것이 오늘로 밀려오지 않는다 — 그날 기준으로 다시 시작한다.
    *
-   * @param at 기준 순간(보통 요청이 도착한 시각). 날짜가 아니라 순간이다 — 유저마다
-   *   하루가 바뀌는 자리가 달라서 날짜를 정하는 것이 이 메서드의 일이다
+   * **하나의 순간이 두 가지로 쓰인다.** 활성 판정에는 그대로(`activeFrom <= at <=
+   * activeUntil`, 사용자 확정 — 서버가 시간 처리를 하지 않는다), 붙일 기록을 찾는
+   * 데는 유저 타임존 기준 날짜로 바꿔서. 유저마다 하루가 바뀌는 자리가 달라 기록
+   * 날짜를 정하는 것은 여전히 이 메서드의 일이다.
+   *
+   * @param at 기준 순간(보통 요청이 도착한 시각)
    * @throws {NotFoundException} 그 유저가 없거나 탈퇴했을 때
    */
   async listDailyOn(userId: bigint, at: Date): Promise<TodoListItem[]> {
     const timeZone = await this.readTimeZone(userId);
-    const rows = await this.templates.findDailyActiveOn(
+    const rows = await this.templates.findDailyActiveAt(
       userId,
+      at,
       toLocalDateKey(at, timeZone),
     );
 
@@ -285,17 +290,12 @@ export class TodosService {
    * 기록이 있을 수 없으므로 조회하지 않는다 — `null`이 "아직 손대지 않았다"는 사실과
    * 일치하기 때문에 값을 지어내는 것이 아니다.
    *
-   * @throws {BadRequestException} 입력이 규칙에 어긋나거나 활성 기간 날짜가 올바르지 않을 때
+   * @throws {BadRequestException} 입력이 규칙에 어긋날 때
    */
   async createTodo(
     userId: bigint,
     input: CreateTodoInput,
   ): Promise<TodoListItem> {
-    // 활성 기간이 날짜 컬럼(`@db.Date`)에 넣어도 되는 값인지 먼저 본다. 어긋난 값은
-    // **예외 없이 하루 밀려 저장되므로**(`todo-local-date.ts`) 저장 뒤에는 드러나지 않는다.
-    this.assertActiveDate('활성 시작일', input.activeFrom);
-    this.assertActiveDate('활성 종료일', input.activeUntil);
-
     this.assertShape({
       todoType: input.todoType,
       completeType: input.completeType,
@@ -352,9 +352,6 @@ export class TodosService {
     if (stored === null) {
       throw new NotFoundException(`그런 할 일이 없다 (todoId=${todoId})`);
     }
-
-    this.assertActiveDate('활성 시작일', input.activeFrom);
-    this.assertActiveDate('활성 종료일', input.activeUntil);
 
     // 검증은 **바뀐 뒤의 최종 상태**를 본다. 주지 않은 필드(`undefined`)에는 저장된 값이
     // 그대로 남으므로 그것을 넣고, `null`("비우라")은 그대로 쓴다. 입력만 보면 "숫자형
@@ -667,9 +664,9 @@ export class TodosService {
       );
     }
 
-    // 활성 기간은 매일 반복이 그날 목록에 나올지를 정하는 값이다. 일회성 목록은 날짜로
-    // 거르지 않으므로(`findOnceWithoutCompletedHistory`) 저장해도 아무것도 하지 않는다 —
-    // 조용히 무시하면 사용자는 기간이 걸린 줄 알고 기다린다.
+    // 활성 기간은 매일 반복이 그 순간 목록에 나올지를 정하는 값이다. 일회성 목록은 활성
+    // 기간으로 거르지 않으므로(`findOnceWithoutCompletedHistory`) 저장해도 아무것도 하지
+    // 않는다 — 조용히 무시하면 사용자는 기간이 걸린 줄 알고 기다린다.
     const activeRangeGiven = [shape.activeFrom, shape.activeUntil].some(
       (value) => value != null,
     );
@@ -682,8 +679,10 @@ export class TodosService {
       throw new BadRequestException('매일 반복 할 일에는 예정일을 둘 수 없다');
     }
 
-    // 뒤집힌 활성 기간은 어느 날짜에도 활성이 아니라 목록에 영영 나오지 않는다. 오류가
-    // 나지 않고 "만들었는데 보이지 않는" 상태가 되는 쪽이라 여기서 막는다.
+    // 뒤집힌 활성 기간은 어느 순간에도 활성이 아니라 목록에 영영 나오지 않는다. 오류가
+    // 나지 않고 "만들었는데 보이지 않는" 상태가 되는 쪽이라 여기서 막는다. Invalid
+    // Date는 이 비교(NaN 비교는 항상 거짓)를 통과한다 — 활성 기간의 형식 검증을 하지
+    // 않는 것과 같은 판단이다(시간 해석은 클라이언트의 몫, 사용자 확정).
     if (
       shape.activeFrom != null &&
       shape.activeUntil != null &&
@@ -691,27 +690,6 @@ export class TodosService {
     ) {
       throw new BadRequestException('활성 기간의 시작일이 종료일보다 늦다');
     }
-  }
-
-  /**
-   * 활성 기간으로 받은 값이 날짜 컬럼(`@db.Date`)에 넣어도 되는지 본다.
-   *
-   * **값이 없는 것은 어긋난 것이 아니다.** 고치기에서 `undefined`는 "그대로 두라"이고
-   * `null`은 "비우라"라서 뜻이 다르지만, 어느 쪽도 날짜가 아니므로 검사할 것이 없다. 두
-   * 뜻의 구분은 이 함수가 아니라 부르는 쪽이 값을 그대로 넘기며 지킨다.
-   *
-   * 느슨한 비교(`!= null`) 하나로 둘을 함께 거르는 것이 여기서는 안전하다. **값을
-   * 만들어 돌려주지 않고 검사만 하므로** 반환 타입에서 두 뜻이 뭉개질 여지가 없다.
-   */
-  private assertActiveDate(
-    label: string,
-    value: Date | null | undefined,
-  ): void {
-    if (value == null) {
-      return;
-    }
-
-    this.assertDateKey(label, value);
   }
 
   /**

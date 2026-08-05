@@ -30,8 +30,9 @@ const USER_ID = 10n;
 const TIME_ZONE = 'Asia/Seoul';
 
 /**
- * 날짜 컬럼(`@db.Date`)에 넘겨서는 안 되는 `Date` 셋이다. Service가 활성 기간과 이력 조회
- * 범위를 `Date`로 받으므로, **잘못 만든 `Date`를 거르는 것이 이 계층의 일이 됐다.**
+ * 날짜 컬럼(`@db.Date`)에 넘겨서는 안 되는 `Date` 셋이다. Service가 이력 조회 범위를
+ * `Date`로 받으므로, **잘못 만든 `Date`를 거르는 것이 이 계층의 일이 됐다.** (활성
+ * 기간은 순간 컬럼이 되면서 이 검사의 대상에서 빠졌다 — `shouldDoAt`과 같은 취급이다.)
  *
  * 셋의 성질이 다르다.
  *
@@ -103,7 +104,7 @@ describe('TodosService', () => {
   let service: TodosService;
   let templates: {
     findOnceWithoutCompletedHistory: jest.Mock;
-    findDailyActiveOn: jest.Mock;
+    findDailyActiveAt: jest.Mock;
     findById: jest.Mock;
     create: jest.Mock;
     update: jest.Mock;
@@ -131,7 +132,7 @@ describe('TodosService', () => {
   beforeEach(async () => {
     templates = {
       findOnceWithoutCompletedHistory: jest.fn(),
-      findDailyActiveOn: jest.fn(),
+      findDailyActiveAt: jest.fn(),
       findById: jest.fn(),
       create: jest.fn(),
       update: jest.fn(),
@@ -204,33 +205,39 @@ describe('TodosService', () => {
   });
 
   describe('listDailyOn', () => {
-    it('유저 타임존 기준 날짜로 조회한다', async () => {
+    it('활성 판정에는 요청 순간을 그대로, 기록에는 유저 타임존 기준 날짜를 넘긴다', async () => {
       // 한국 시간대 자정 직전이다. UTC로는 8월 1일이지만 유저가 보는 날짜는 8월 2일이다.
-      templates.findDailyActiveOn.mockResolvedValue([]);
+      // 활성 판정은 순간 그대로 비교하므로(사용자 확정) 순간이 손대지 않고 전달돼야 한다.
+      templates.findDailyActiveAt.mockResolvedValue([]);
+      const at = new Date('2026-08-01T15:00:00.000Z');
 
-      await service.listDailyOn(USER_ID, new Date('2026-08-01T15:00:00.000Z'));
+      await service.listDailyOn(USER_ID, at);
 
-      expect(templates.findDailyActiveOn).toHaveBeenCalledWith(
+      expect(templates.findDailyActiveAt).toHaveBeenCalledWith(
         USER_ID,
+        at,
         parseLocalDateKey('2026-08-02'),
       );
     });
 
-    it('같은 순간이라도 타임존이 다르면 다른 날짜를 조회한다', async () => {
-      // 날짜 경계가 유저 설정으로 정해진다는 것을 고정한다.
+    it('같은 순간이라도 타임존이 다르면 다른 날짜의 기록을 찾는다', async () => {
+      // 기록 날짜의 경계가 유저 설정으로 정해진다는 것을 고정한다. 활성 판정에
+      // 넘기는 순간은 타임존과 무관하게 같다.
       users.findTimeZone.mockResolvedValue('America/New_York');
-      templates.findDailyActiveOn.mockResolvedValue([]);
+      templates.findDailyActiveAt.mockResolvedValue([]);
+      const at = new Date('2026-08-01T15:00:00.000Z');
 
-      await service.listDailyOn(USER_ID, new Date('2026-08-01T15:00:00.000Z'));
+      await service.listDailyOn(USER_ID, at);
 
-      expect(templates.findDailyActiveOn).toHaveBeenCalledWith(
+      expect(templates.findDailyActiveAt).toHaveBeenCalledWith(
         USER_ID,
+        at,
         parseLocalDateKey('2026-08-01'),
       );
     });
 
     it('그날 기록에서 progress를 만든다', async () => {
-      templates.findDailyActiveOn.mockResolvedValue([
+      templates.findDailyActiveAt.mockResolvedValue([
         withHistories(createTemplate(), [
           createHistory({
             progressValue: new Prisma.Decimal('800'),
@@ -249,7 +256,7 @@ describe('TodosService', () => {
     });
 
     it('그날 기록이 없으면 progress가 null이다', async () => {
-      templates.findDailyActiveOn.mockResolvedValue([
+      templates.findDailyActiveAt.mockResolvedValue([
         withHistories(createTemplate()),
       ]);
 
@@ -277,7 +284,7 @@ describe('TodosService', () => {
       await expect(
         service.listDailyOn(USER_ID, new Date('2026-08-02T02:00:00.000Z')),
       ).rejects.toThrow(NotFoundException);
-      expect(templates.findDailyActiveOn).not.toHaveBeenCalled();
+      expect(templates.findDailyActiveAt).not.toHaveBeenCalled();
     });
   });
 
@@ -657,8 +664,8 @@ describe('TodosService', () => {
     });
 
     it('활성 기간을 그대로 넘긴다', async () => {
-      // 받은 `Date`를 손대지 않고 넘긴다. 여기서 다시 만들면 그 자리가 하루 밀리는
-      // 함정을 되살리는 자리가 된다.
+      // 받은 `Date`를 손대지 않고 넘긴다. 여기서 다시 만들면 그 자리가 값을 바꾸는
+      // 함정이 될 수 있는 자리가 된다.
       await service.createTodo(
         USER_ID,
         validInput({
@@ -672,6 +679,27 @@ describe('TodosService', () => {
           activeFrom: parseLocalDateKey('2026-08-01'),
           activeUntil: parseLocalDateKey('2026-12-31'),
         }),
+      );
+    });
+
+    it('자정이 아닌 순간도 활성 기간으로 받아 그대로 넘긴다', async () => {
+      // 활성 기간이 순간 컬럼(`Timestamptz`)이 되면서 `shouldDoAt`과 같은 입력이 됐다.
+      // 자정 검증도 하지 않는다 — 시간 해석은 클라이언트의 몫이다(사용자 확정).
+      //
+      // 반환 대역을 픽스처로 덮는 이유: 이 테스트의 관심사는 **Repository에 무엇이
+      // 전달되는가**이고, 반환값이 응답으로 바뀌는 형태는 뷰 계층 테스트(`todo-view.spec.ts`)
+      // 가 고정한다.
+      templates.create.mockResolvedValue(createTemplate());
+      const activeFrom = new Date('2026-08-01T10:30:00.000Z');
+      const activeUntil = new Date('2026-12-31T22:15:45.500Z');
+
+      await service.createTodo(
+        USER_ID,
+        validInput({ activeFrom, activeUntil }),
+      );
+
+      expect(templates.create).toHaveBeenCalledWith(
+        expect.objectContaining({ activeFrom, activeUntil }),
       );
     });
 
@@ -742,51 +770,6 @@ describe('TodosService', () => {
           }),
         ),
       ).rejects.toThrow(BadRequestException);
-    });
-
-    it.each(INVALID_DATE_KEYS)(
-      '활성 시작일이 %p면 거절한다',
-      async (activeFrom) => {
-        // 날짜 컬럼(`@db.Date`)에 넣을 수 없는 `Date`다. 셋의 성질은 상수 주석에 있다 —
-        // 특히 로컬 타임존 자정은 **아무 예외 없이 하루 밀려 저장되는** 값이라, 이
-        // 검사가 없으면 잘못 저장된 뒤에야 드러난다.
-        await expect(
-          service.createTodo(USER_ID, validInput({ activeFrom })),
-        ).rejects.toThrow(BadRequestException);
-      },
-    );
-
-    // 활성 기간도 **양 끝을 각각** 단정한다. 기간 범위 쪽과 같은 근거다 — 응답이 어느
-    // 값이 문제인지 알려 주는 것이 자리 이름을 인자로 받는 목적이고, 두 이름을 뒤바꿔
-    // 넘기면 사용자가 엉뚱한 필드를 고치려 한다. 종류만 단정하면 그 변경이 통과한다.
-    it('활성 시작일이 잘못되면 그 자리를 알려 준다', async () => {
-      const thrown = await service
-        .createTodo(USER_ID, validInput({ activeFrom: INVALID_DATE }))
-        .catch((error: Error) => error);
-
-      expect(thrown).toBeInstanceOf(BadRequestException);
-      expect((thrown as Error).message).toContain('활성 시작일');
-      expect((thrown as Error).message).not.toContain('종료일');
-    });
-
-    it('활성 종료일이 잘못되면 그 자리를 알려 준다', async () => {
-      const thrown = await service
-        .createTodo(USER_ID, validInput({ activeUntil: INVALID_DATE }))
-        .catch((error: Error) => error);
-
-      expect(thrown).toBeInstanceOf(BadRequestException);
-      expect((thrown as Error).message).toContain('활성 종료일');
-      expect((thrown as Error).message).not.toContain('시작일');
-    });
-
-    it('활성 기간이 잘못되면 만들지 않는다', async () => {
-      await expect(
-        service.createTodo(
-          USER_ID,
-          validInput({ activeFrom: KST_LOCAL_MIDNIGHT }),
-        ),
-      ).rejects.toThrow(BadRequestException);
-      expect(templates.create).not.toHaveBeenCalled();
     });
 
     it('거절하면 만들지 않는다', async () => {
@@ -884,49 +867,20 @@ describe('TodosService', () => {
       });
     });
 
-    // 고치기 경로에도 같은 검사가 걸리는지 **따로** 본다. 만들기 쪽 테스트는 이 경로를
-    // 덮지 못한다 — 두 메서드가 같은 헬퍼를 부르는 것은 지금의 구현일 뿐이고, 한쪽에서만
-    // 검사를 빼는 변경이 나머지 한쪽의 테스트로는 드러나지 않는다.
-    it.each(INVALID_DATE_KEYS)(
-      '활성 시작일이 %p면 거절하고 고치지 않는다',
-      async (activeFrom) => {
-        templates.findById.mockResolvedValue(
-          createTemplate({ completeType: 'DAILY' }),
-        );
-
-        await expect(
-          service.updateTodo(USER_ID, 1n, { activeFrom }),
-        ).rejects.toThrow(BadRequestException);
-        expect(templates.update).not.toHaveBeenCalled();
-      },
-    );
-
-    it('활성 시작일이 잘못되면 그 자리를 알려 준다', async () => {
+    it('자정이 아닌 순간도 활성 기간으로 받아 그대로 넘긴다', async () => {
+      // 만들기 쪽과 같은 규칙이 고치기 경로에도 걸리는지 따로 본다 — 두 메서드가
+      // 같은 검증 경로를 지나는 것은 지금의 구현일 뿐이다.
       templates.findById.mockResolvedValue(
         createTemplate({ completeType: 'DAILY' }),
       );
+      templates.update.mockResolvedValue(createTemplate());
+      const activeFrom = new Date('2026-08-01T10:30:00.000Z');
 
-      const thrown = await service
-        .updateTodo(USER_ID, 1n, { activeFrom: INVALID_DATE })
-        .catch((error: Error) => error);
+      await service.updateTodo(USER_ID, 1n, { activeFrom });
 
-      expect(thrown).toBeInstanceOf(BadRequestException);
-      expect((thrown as Error).message).toContain('활성 시작일');
-      expect((thrown as Error).message).not.toContain('종료일');
-    });
-
-    it('활성 종료일이 잘못되면 그 자리를 알려 준다', async () => {
-      templates.findById.mockResolvedValue(
-        createTemplate({ completeType: 'DAILY' }),
-      );
-
-      const thrown = await service
-        .updateTodo(USER_ID, 1n, { activeUntil: INVALID_DATE })
-        .catch((error: Error) => error);
-
-      expect(thrown).toBeInstanceOf(BadRequestException);
-      expect((thrown as Error).message).toContain('활성 종료일');
-      expect((thrown as Error).message).not.toContain('시작일');
+      expect(templates.update).toHaveBeenCalledWith(USER_ID, 1n, {
+        activeFrom,
+      });
     });
 
     it('활성 기간을 비우는 것은 허용한다', async () => {
