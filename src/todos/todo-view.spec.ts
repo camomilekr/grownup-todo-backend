@@ -80,7 +80,7 @@ describe('toProgress', () => {
   });
 
   it('빈 배열에서 꺼낸 기록(undefined)도 null이다', () => {
-    // **실제 공급자는 배열의 첫 항목이다.** `findDailyActiveOn`이 돌려주는 행의
+    // **실제 공급자는 배열의 첫 항목이다.** `findDailyActiveAt`이 돌려주는 행의
     // `histories`는 0개 또는 1개이고, 비어 있을 때 `histories[0]`은 `null`이 아니라
     // `undefined`다. 이 프로젝트는 `strictNullChecks: false`라 그 값이 `TodoHistory`
     // 타입으로 통과하므로 **컴파일러가 막아 주지 않는다** — 함수가 직접 감당한다.
@@ -188,19 +188,19 @@ describe('toTodoListItem', () => {
     expect(item.remindAt).toBe('09:00');
   });
 
-  it('활성 기간을 YYYY-MM-DD 문자열로 내보낸다', () => {
-    // `@db.Date`에서 읽은 값은 UTC 자정 `Date`다. 그대로 내보내면 받는 쪽이 자기
-    // 로컬 타임존으로 해석해 음수 오프셋 지역에서 하루 앞으로 밀려 보인다.
+  it('활성 기간을 Date 그대로 내보낸다', () => {
+    // 활성 기간은 순간 컬럼(`Timestamptz`)이다 — `shouldDoAt`과 같은 성질이라 날짜
+    // 문자열로 줄이면 시·분이 사라진다. 시간 해석은 받는 쪽(클라이언트)의 몫이다.
+    const activeFrom = new Date('2026-08-01T10:30:00.000Z');
+    const activeUntil = new Date('2026-12-31T22:15:45.500Z');
+
     const item = toTodoListItem(
-      createTemplate({
-        activeFrom: parseLocalDateKey('2026-08-01'),
-        activeUntil: parseLocalDateKey('2026-12-31'),
-      }),
+      createTemplate({ activeFrom, activeUntil }),
       null,
     );
 
-    expect(item.activeFrom).toBe('2026-08-01');
-    expect(item.activeUntil).toBe('2026-12-31');
+    expect(item.activeFrom).toEqual(activeFrom);
+    expect(item.activeUntil).toEqual(activeUntil);
   });
 
   it('활성 기간이 비어 있으면 null이다', () => {
@@ -237,7 +237,7 @@ describe('toTodoListItem', () => {
   });
 
   it('매일 반복 목록이 넘기는 빈 histories의 첫 항목도 받아 낸다', () => {
-    // 목록 조회가 실제로 밟는 경로다. `findDailyActiveOn`은 행에 `histories` 배열을
+    // 목록 조회가 실제로 밟는 경로다. `findDailyActiveAt`은 행에 `histories` 배열을
     // 붙여 주고 부르는 쪽이 그 첫 항목을 넘기는데, 아직 손대지 않은 날은 그 배열이
     // 비어 있다. `?? null`을 빼먹어도 조용히 넘어가거나 터지지 않아야 한다.
     const row = { ...createTemplate(), histories: [] as TodoHistory[] };

@@ -109,24 +109,25 @@ describe('Todos Repository (e2e)', () => {
       expect(found?.targetValue?.toString()).toBe('30.5');
     });
 
-    it('활성 기간이 자정 아닌 순간을 잘림 없이 보존한다', async () => {
-      // 두 컬럼이 `date`에서 `timestamptz(3)`로 바뀌었다. `date`였을 때는 시각이
-      // 조용히 잘려 나가 자정으로 돌아왔다 — 이 테스트가 그 잘림이 되살아나는
-      // 회귀를 막는다.
+    it('활성 기간이 시각을 보존해 왕복한다', async () => {
+      // `active_from`/`active_until`은 순간 컬럼(`timestamptz`)이다. 이전의 날짜
+      // 컬럼(`@db.Date`)이었다면 어댑터가 UTC 날짜 컴포넌트만 직렬화해 시각이
+      // **예외 없이** 자정으로 잘렸다 — 그 회귀를 이 왕복이 잡는다. 시간 해석은
+      // 클라이언트의 몫이므로 서버는 받은 순간을 그대로 저장하고 그대로 돌려준다.
       const created = await templates.create({
         userId,
         title: '아침 산책',
         todoType: 'GENERAL',
         completeType: 'DAILY',
-        activeFrom: new Date('2026-08-01T09:30:00.000Z'),
-        activeUntil: new Date('2026-08-31T15:45:00.500Z'),
+        activeFrom: new Date('2026-08-01T10:30:00.000Z'),
+        activeUntil: new Date('2026-08-31T22:15:45.500Z'),
       });
 
       const found = await templates.findById(userId, created.todoId);
 
-      expect(found?.activeFrom?.toISOString()).toBe('2026-08-01T09:30:00.000Z');
+      expect(found?.activeFrom?.toISOString()).toBe('2026-08-01T10:30:00.000Z');
       expect(found?.activeUntil?.toISOString()).toBe(
-        '2026-08-31T15:45:00.500Z',
+        '2026-08-31T22:15:45.500Z',
       );
     });
 
@@ -595,20 +596,24 @@ describe('Todos Repository (e2e)', () => {
   });
 
   describe('DAILY 목록 — 어제 것이 오늘로 밀려오지 않는다', () => {
+    // 활성 판정은 **요청 순간**과 활성 기간을 그대로 비교한다(사용자 확정 — 서버가
+    // 시간 처리를 하지 않는다). 붙여 줄 기록은 여전히 유저 타임존 기준 날짜로 찾는다.
     const yesterday = parseLocalDateKey('2026-08-01');
     const today = parseLocalDateKey('2026-08-02');
+    /** 판정 기준 순간. 요청이 도착한 시각을 흉내 낸다 — `today`에 해당하는 낮이다 */
+    const at = new Date('2026-08-02T05:00:00.000Z');
 
-    it('활성 기간 안이면 그날 히스토리가 없어도 목록에 나온다', async () => {
+    it('요청 순간이 활성 기간 안이면 그날 히스토리가 없어도 목록에 나온다', async () => {
       const template = await templates.create({
         userId,
         title: '활성 DAILY',
         todoType: 'GENERAL',
         completeType: 'DAILY',
-        activeFrom: parseLocalDateKey('2026-07-01'),
-        activeUntil: parseLocalDateKey('2026-12-31'),
+        activeFrom: new Date('2026-07-01T00:00:00.000Z'),
+        activeUntil: new Date('2026-12-31T23:59:59.999Z'),
       });
 
-      const rows = await templates.findDailyActiveOn(userId, today, today);
+      const rows = await templates.findDailyActiveAt(userId, at, today);
 
       const row = rows.find((item) => item.todoId === template.todoId);
       expect(row).toBeDefined();
@@ -616,25 +621,31 @@ describe('Todos Repository (e2e)', () => {
       expect(row?.histories).toEqual([]);
     });
 
-    it('activeFrom과 같은 순간부터 나온다 (시작 순간 포함)', async () => {
+    it('요청 순간이 activeFrom 직전이면 빠지고 그 순간부터 나온다', async () => {
       // 반열림 구간에서 포함되는 쪽 경계다. `lte`를 `lt`로 바꾸는 수정이 통과하지
-      // 않게 경계 양쪽을 고정한다.
+      // 않게 경계를 순간 단위로 고정한다 — 컬럼이 `timestamptz(3)`라 1밀리초가
+      // 판별 가능한 최소 간격이다.
+      const activeFrom = new Date('2026-08-02T10:30:00.000Z');
       const template = await templates.create({
         userId,
         title: '시작 순간 경계',
         todoType: 'GENERAL',
         completeType: 'DAILY',
-        activeFrom: today,
+        activeFrom,
       });
 
-      const onStart = await templates.findDailyActiveOn(userId, today, today);
-      const justBefore = await templates.findDailyActiveOn(
+      const atStart = await templates.findDailyActiveAt(
         userId,
-        new Date('2026-08-01T23:59:59.999Z'),
-        yesterday,
+        activeFrom,
+        today,
+      );
+      const justBefore = await templates.findDailyActiveAt(
+        userId,
+        new Date(activeFrom.getTime() - 1),
+        today,
       );
 
-      expect(onStart.map((item) => item.todoId)).toContain(template.todoId);
+      expect(atStart.map((item) => item.todoId)).toContain(template.todoId);
       // 시작 직전 순간에는 빠진다.
       expect(justBefore.map((item) => item.todoId)).not.toContain(
         template.todoId,
@@ -642,10 +653,11 @@ describe('Todos Repository (e2e)', () => {
     });
 
     it('activeUntil과 같은 순간에는 빠지고 직전 순간에는 나온다 (반열림)', async () => {
-      // 활성 판정은 반열림 구간이다 — `activeFrom <= 순간 < activeUntil`. 상한
-      // 순간 자체는 포함되지 않는다. `gt`를 `gte`로 되돌리는 수정이 통과하지
-      // 않게 경계 양쪽을 함께 고정한다.
-      const activeUntil = new Date('2026-08-02T00:00:00.000Z');
+      // 활성 판정은 반열림 구간이다 — `activeFrom <= 순간 < activeUntil`(사용자
+      // 최종 확정). 상한 순간 자체는 포함되지 않는다. `gt`를 `gte`로 되돌리는
+      // 수정이 통과하지 않게 경계 양쪽을 함께 고정한다 — 컬럼이 `timestamptz(3)`라
+      // 1밀리초가 판별 가능한 최소 간격이다.
+      const activeUntil = new Date('2026-08-02T18:45:00.000Z');
       const template = await templates.create({
         userId,
         title: '반열림 상한 경계',
@@ -655,14 +667,14 @@ describe('Todos Repository (e2e)', () => {
         activeUntil,
       });
 
-      const atBoundary = await templates.findDailyActiveOn(
+      const atBoundary = await templates.findDailyActiveAt(
         userId,
         activeUntil,
         today,
       );
-      const justBefore = await templates.findDailyActiveOn(
+      const justBefore = await templates.findDailyActiveAt(
         userId,
-        new Date('2026-08-01T23:59:59.999Z'),
+        new Date(activeUntil.getTime() - 1),
         today,
       );
 
@@ -680,10 +692,10 @@ describe('Todos Repository (e2e)', () => {
         title: '시작 제한 없는 DAILY',
         todoType: 'GENERAL',
         completeType: 'DAILY',
-        activeUntil: parseLocalDateKey('2026-12-31'),
+        activeUntil: new Date('2026-12-31T23:59:59.999Z'),
       });
 
-      const rows = await templates.findDailyActiveOn(userId, today, today);
+      const rows = await templates.findDailyActiveAt(userId, at, today);
 
       expect(rows.map((item) => item.todoId)).toContain(template.todoId);
     });
@@ -694,11 +706,11 @@ describe('Todos Repository (e2e)', () => {
         title: '기간 끝난 DAILY',
         todoType: 'GENERAL',
         completeType: 'DAILY',
-        activeFrom: parseLocalDateKey('2026-07-01'),
-        activeUntil: parseLocalDateKey('2026-07-31'),
+        activeFrom: new Date('2026-07-01T00:00:00.000Z'),
+        activeUntil: new Date('2026-07-31T23:59:59.999Z'),
       });
 
-      const rows = await templates.findDailyActiveOn(userId, today, today);
+      const rows = await templates.findDailyActiveAt(userId, at, today);
 
       expect(rows.map((item) => item.todoId)).not.toContain(template.todoId);
     });
@@ -709,23 +721,24 @@ describe('Todos Repository (e2e)', () => {
         title: '무기한 DAILY',
         todoType: 'GENERAL',
         completeType: 'DAILY',
-        activeFrom: parseLocalDateKey('2026-07-01'),
+        activeFrom: new Date('2026-07-01T00:00:00.000Z'),
       });
 
-      const rows = await templates.findDailyActiveOn(userId, today, today);
+      const rows = await templates.findDailyActiveAt(userId, at, today);
 
       expect(rows.map((item) => item.todoId)).toContain(template.todoId);
     });
 
     it('어제 완료해도 오늘은 히스토리 없이 다시 나온다', async () => {
       // 확정된 요구사항의 핵심이다 — 어제 것이 오늘로 밀려오지 않고, 어제는
-      // 어제 상태로 남는다.
+      // 어제 상태로 남는다. 판정 순간은 같은 활성 기간 안에 있으므로 두 조회의
+      // 차이는 **어느 날짜의 기록을 붙이는가**뿐이다.
       const template = await templates.create({
         userId,
         title: '어제 완료한 DAILY',
         todoType: 'GENERAL',
         completeType: 'DAILY',
-        activeFrom: parseLocalDateKey('2026-07-01'),
+        activeFrom: new Date('2026-07-01T00:00:00.000Z'),
       });
       const snapshot = {
         todoId: template.todoId,
@@ -738,12 +751,12 @@ describe('Todos Repository (e2e)', () => {
         completedAt: new Date('2026-08-01T10:00:00.000Z'),
       });
 
-      const yesterdayRows = await templates.findDailyActiveOn(
+      const yesterdayRows = await templates.findDailyActiveAt(
         userId,
-        yesterday,
+        new Date('2026-08-01T10:00:00.000Z'),
         yesterday,
       );
-      const todayRows = await templates.findDailyActiveOn(userId, today, today);
+      const todayRows = await templates.findDailyActiveAt(userId, at, today);
 
       // 어제는 완료 기록이 붙어 있다.
       expect(

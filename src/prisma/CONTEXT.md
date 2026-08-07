@@ -85,14 +85,17 @@ enum은 `CompleteType`(일회성 `ONCE`·매일 반복 `DAILY`)과 `TodoType`(�
 
 ### 입력 경계에서 검증·정규화해야 하는 것 (아직 아무것도 없다)
 
-DTO 계층이 생기는 라운드가 **이 넷을 한 묶음으로** 처리해야 한다. 지금은 어느 것도 DB가 막지 않는다.
+DTO 계층이 생기는 라운드가 **이 셋을 한 묶음으로** 처리해야 한다. 지금은 어느 것도 DB가 막지 않는다.
 
 | 컬럼 | 무엇이 필요한가 | 막지 않으면 |
 |---|---|---|
 | `app_user.email` | `trim()` + `toLowerCase()` | 같은 사람이 두 계정을 갖는다 |
 | `app_user.time_zone` | IANA 이름인지 (`Intl.supportedValuesOf('timeZone')`) | `toLocalDateKey`가 `RangeError`를 던져 **그 유저의 모든 날짜 계산이 영구히 실패한다** |
 | `todo_template.remind_at` | `HH:mm` 형식인지 (00~23시, 00~59분). 정규식은 표 아래에 | 스캔이 문자열 동등 비교라 **에러 없이 영원히 알림이 오지 않는다** |
-| `todo_template.active_from`/`active_until` | 유효한 `Date`인지 (`Invalid Date` 거절) | `Invalid Date`가 Prisma까지 새면 500이 된다 |
+
+`todo_template.active_from`/`active_until`은 이 표에서 빠졌다. 순간 컬럼(`timestamptz`)이
+되면서(마이그레이션 `20260805123230_active_period_timestamptz`) `should_do_at`과 같은
+성질이 됐고, 날짜 형식 검증이 필요 없다 — 시간 해석은 클라이언트의 몫이다(사용자 확정).
 
 `remind_at`에 쓸 정규식이다. 표 안에 두면 마크다운이 파이프를 열 구분자로 읽어 표가
 깨지므로(이스케이프하면 렌더링은 되지만 raw 텍스트에서 복사하면 틀린 식이 된다) 여기에
@@ -104,9 +107,9 @@ DTO 계층이 생기는 라운드가 **이 넷을 한 묶음으로** 처리해�
 
 ### 날짜·시각 컬럼에 어떤 타입을 쓰는가
 
-**순간을 담는 컬럼은 `@db.Timestamptz(3)`, 달력의 날짜를 담는 컬럼은 `@db.Date`다.** 생성·수정·삭제 시각과 `should_do_at`·`completed_at`·`active_from`·`active_until`이 앞쪽이고, `@db.Date`는 `historied_on` 하나뿐이다. 타임존 없는 `timestamp`를 쓰는 컬럼은 하나도 없다.
+**순간을 담는 컬럼은 `@db.Timestamptz(3)`, 달력의 날짜를 담는 컬럼은 `@db.Date`다.** 생성·수정·삭제 시각과 `should_do_at`·`completed_at`·`active_from`·`active_until`이 앞쪽이고, 날짜 컬럼은 이제 `historied_on` 하나다. 타임존 없는 `timestamp`를 쓰는 컬럼은 하나도 없다.
 
-**활성 기간 두 컬럼은 원래 `date`였다가 `timestamptz(3)`로 바뀌었다**(마이그레이션 `20260805123230_active_period_timestamptz`). 판정의 의미도 함께 바뀌어 반열림 구간(`active_from <= 순간 < active_until`)이다 — 그 마이그레이션이 기존 행의 포함 종료일을 하루 더해 미포함 상한으로 보정하고 컬럼 코멘트도 갱신한다.
+**활성 기간 두 컬럼은 원래 `@db.Date`였다가 `timestamptz(3)`로 바뀌었다**(마이그레이션 `20260805123230_active_period_timestamptz`) — 서버가 시간 처리를 하지 않고 클라이언트가 해석한다는 전제가 확정되면서다. 판정의 의미도 함께 바뀌어 반열림 구간(`active_from <= 순간 < active_until`)이다 — 그 마이그레이션이 기존 행의 포함 종료일을 하루 더해 미포함 상한으로 보정하고 컬럼 코멘트도 갱신한다.
 
 **`timestamptz`는 이름과 달리 타임존을 저장하지 않는다.** 받은 값을 협정 세계시(Coordinated Universal Time, UTC)로 정규화하고 타임존은 버린다 — 서울 시각 9시와 협정 세계시 자정을 각각 넣으면 저장된 값이 같아진다(실측). 그래서 이 타입이 가리키는 것은 표기가 아니라 순간 하나다.
 

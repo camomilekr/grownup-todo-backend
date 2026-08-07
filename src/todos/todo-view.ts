@@ -120,9 +120,15 @@ type TodoTemplateView = {
   /** **현재** 목표치와 단위. 기록에 복사된 값과 다를 수 있다 */
   targetValue: number | null;
   targetUnit: string | null;
-  /** 매일 반복의 활성 기간(`YYYY-MM-DD`). 양 끝을 포함하고 `null`은 제한 없음이다 */
-  activeFrom: string | null;
-  activeUntil: string | null;
+  /**
+   * 매일 반복의 활성 기간. **반열림 구간**이다 — `activeFrom <= 순간 < activeUntil`
+   * (사용자 최종 확정). 시작 순간은 포함되고 상한 순간은 포함되지 않으며, `null`은
+   * 제한 없음이다.
+   * 순간(`Timestamptz`)이라 `shouldDoAt`처럼 `Date` 그대로 내보낸다 — 날짜 문자열로
+   * 줄이면 시·분이 사라지고, 시간 해석은 받는 쪽(클라이언트)의 몫이다.
+   */
+  activeFrom: Date | null;
+  activeUntil: Date | null;
 };
 
 /**
@@ -179,7 +185,7 @@ export type TodoDetail = OnceTodoDetail | DailyTodoDetail;
  * `tsconfig.json`이 `strictNullChecks: false`이고 `noUncheckedIndexedAccess`도 켜져 있지
  * 않다. 그래서 **빈 배열의 첫 항목(`histories[0]`)이 `TodoHistory` 타입으로 통과한다** —
  * 실제 값은 `undefined`인데 컴파일러가 아무 진단도 내지 않는다. 목록 조회가 넘기는 값이
- * 바로 그것이고(`findDailyActiveOn`의 `histories`는 0개 또는 1개다), "아직 손대지 않은
+ * 바로 그것이고(`findDailyActiveAt`의 `histories`는 0개 또는 1개다), "아직 손대지 않은
  * 할 일"은 예외가 아니라 **가장 흔한 상태**다.
  *
  * 엄격한 비교(`=== null`)로 두면 두 방향으로 잘못된다. 값을 읽는 자리에서는 예외가 나서
@@ -197,11 +203,6 @@ function toNumberOrNull(
   return value == null ? null : value.toNumber();
 }
 
-/** `@db.Date` 컬럼에서 읽은 UTC 자정 `Date`를 `YYYY-MM-DD`로. 없는 값은 `null`이다 */
-function toDateKeyOrNull(value: Date | null | undefined): string | null {
-  return value == null ? null : formatLocalDateKey(value);
-}
-
 /** 정의에서 나오는 값들만 옮긴다. `completeType`은 갈래마다 다르게 붙인다 */
 function toTemplateView(template: TodoTemplate): TodoTemplateView {
   return {
@@ -213,8 +214,8 @@ function toTemplateView(template: TodoTemplate): TodoTemplateView {
     shouldDoAt: template.shouldDoAt,
     targetValue: toNumberOrNull(template.targetValue),
     targetUnit: template.targetUnit,
-    activeFrom: toDateKeyOrNull(template.activeFrom),
-    activeUntil: toDateKeyOrNull(template.activeUntil),
+    activeFrom: template.activeFrom,
+    activeUntil: template.activeUntil,
   };
 }
 
