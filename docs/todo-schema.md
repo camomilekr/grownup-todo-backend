@@ -1,6 +1,6 @@
 # todo 스키마
 
-> 기준: `prisma/schema.prisma` · 마이그레이션 `20260731075406_init_todo_entities`(테이블 생성), `20260731164011_fix_todo_history_user_id_comment`(컬럼 코멘트 수정), `20260805123230_active_period_timestamptz`(활성 기간을 날짜에서 순간으로)
+> 기준: `prisma/schema.prisma` · 마이그레이션 `20260731075406_init_todo_entities`(테이블 생성), `20260731164011_fix_todo_history_user_id_comment`(컬럼 코멘트 수정), `20260805123230_active_period_timestamptz`(활성 기간을 날짜에서 순간으로), `20260807162419_active_period_check`(활성 기간 CHECK 제약)
 
 ## 전체 그림부터
 
@@ -98,6 +98,7 @@ appUser ──┬─< todoTemplate ──< todoHistory
 |---|---|---|
 | UNIQUE | `(todo_id, user_id)` | `todoId`만으로도 행이 정해지므로 논리적으로는 중복이다. `todoHistory`가 이 두 컬럼을 묶어 참조하는데, Postgres가 그런 참조의 대상 쪽에 같은 조합의 유일 제약을 요구해서 둔다 |
 | INDEX | `(user_id, deleted_at)` | 목록 조회 두 가지가 모두 `userId`로 좁히고 삭제되지 않은 것만 보므로 함께 묶었다 |
+| CHECK | `todo_template_active_period_check` — 두 값이 모두 있으면 `active_from < active_until` | 동시 수정의 패자가 뒤집힌·빈 활성 기간을 저장하는 것을 막는 최종 방어다 (아래 [활성 기간](#활성-기간은-순간이고-판정은-반열림이다) 절 참고) |
 
 ### 활성 기간은 순간이고 판정은 반열림이다
 
@@ -106,6 +107,8 @@ appUser ──┬─< todoTemplate ──< todoHistory
 상한을 미포함으로 정한 이유가 있다. 순간에는 "그날의 끝"이 없어서, 상한을 포함으로 두면 "8월 31일까지"를 `23:59:59.999…` 같은 하루의 마지막 순간으로 표현해야 하고 그 값은 정밀도에 따라 달라진다. 미포함 상한이면 다음 날 자정 하나로 끝나고, 이어지는 두 기간이 겹치지도 비지도 않는다.
 
 `timestamptz`는 이름과 달리 타임존을 저장하지 않는다 — 받은 값을 UTC로 정규화한 **순간 하나**를 저장한다. 그래서 같은 값이 유저마다 다른 벽시계 시각으로 읽히고, "그 순간에 활성인가"라는 질문의 답은 타임존과 무관하게 하나다.
+
+**뒤집힌·빈 기간은 CHECK 제약이 막는다** (`todo_template_active_period_check`, 마이그레이션 `20260807162419_active_period_check`). 두 값이 모두 있으면 `active_from < active_until`이어야 한다 — 등호가 없는 이유는 판정이 반열림이라 두 값이 같으면 만족하는 순간이 없는 빈 구간이기 때문이고, Service 검증(`assertShape`)의 `>=` 거절과 같은 경계다. NULL은 그쪽 제한이 없다는 뜻이라 허용한다. Service가 같은 규칙으로 먼저 400을 던지는데도 제약을 둔 이유는 `updateTodo`의 읽기와 쓰기 사이에 잠금이 없어서다 — 서로 반대쪽 필드를 고치는 두 요청이 각자의 스냅샷으로 검증을 통과하면 패자의 저장이 뒤집힌·빈 기간을 만들고, 그 마지막 경로를 DB가 거절한다(사용자 확정 — 트랜잭션 직렬화 대신 CHECK).
 
 ### 종류와 반복 방식은 만든 뒤 바꿀 수 없다
 
@@ -241,4 +244,4 @@ Supabase는 `public` 스키마에 새로 만들어지는 모든 테이블에 `an
 
 **이 프로젝트는 현재 Data API(DB를 HTTP로 직접 노출하는 기능)가 꺼져 있어서 그 권한에 닿을 경로가 없다.** 지금 뚫려 있는 구멍을 막는 것이 아니라 그 기능을 켜는 날을 위한 대비이고, 백엔드에 아무 영향이 없으므로 비용이 0이다.
 
-**RLS와 컬럼 설명(DB 코멘트)은 Prisma가 표현하지 못해 마이그레이션 SQL에 손으로 넣었다.** `prisma migrate diff`가 둘 다 감지하지 못하므로 마이그레이션을 다시 뽑으면 조용히 사라진다 — `test/schema-guard.e2e-spec.ts`가 `public`의 모든 테이블과 컬럼을 훑어 빠진 것을 잡는다. 목록을 코드에 적어 두지 않았기 때문에 **앞으로 추가되는 테이블에도 자동으로 적용된다.**
+**RLS·컬럼 설명(DB 코멘트)·활성 기간 CHECK 제약은 Prisma가 표현하지 못해 마이그레이션 SQL에 손으로 넣었다.** `prisma migrate diff`가 셋 다 감지하지 못하므로 마이그레이션을 다시 뽑으면 조용히 사라진다. RLS와 코멘트는 `test/schema-guard.e2e-spec.ts`가 `public`의 모든 테이블과 컬럼을 훑어 빠진 것을 잡는다 — 목록을 코드에 적어 두지 않았기 때문에 **앞으로 추가되는 테이블에도 자동으로 적용된다.** CHECK 제약은 `test/todos.e2e-spec.ts`의 "활성 기간 CHECK 제약" 절이 직접 삽입·갱신의 거절로 잡는다.

@@ -1,6 +1,9 @@
 import { INestApplication } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { AppModule } from './../src/app.module';
+// `Prisma`를 값으로 가져온다 — CHECK 제약 위반의 오류 종류를 `instanceof`로
+// 단정해야 하기 때문이다. 코드 문자열만 보면 그 속성을 가진 아무 객체나 통과한다.
+import { Prisma } from './../src/generated/prisma/client';
 import { PrismaService } from './../src/prisma/prisma.service';
 import { TodoHistoriesRepository } from './../src/todos/todo-histories.repository';
 import {
@@ -1344,6 +1347,138 @@ describe('Todos Repository (e2e)', () => {
         }),
         // 제약 이름까지 확인한다. 다른 이유로 실패해도 통과하는 것을 막는다.
       ).rejects.toThrow('todo_history_todo_id_user_id_fkey');
+    });
+  });
+
+  describe('활성 기간 CHECK 제약 — 뒤집힌·빈 기간을 DB가 막는다', () => {
+    // `updateTodo`의 읽기→검증→쓰기 사이에 잠금이 없어, 서로 반대쪽 활성 기간
+    // 필드를 고치는 두 요청이 각자의 스냅샷으로 검증을 통과하면 뒤집힌·빈 기간이
+    // 저장될 수 있다. 그 경쟁의 최종 방어가 DB CHECK 제약이고, 이 절이 그것을
+    // 고정한다.
+    //
+    // **Repository·Service를 거치지 않고 `prisma`로 직접 시도한다.** 정상 경로는
+    // `assertShape`가 먼저 400으로 거절해 DB까지 도달하지 않으므로, 그대로 두면
+    // 이 테스트가 통과하면서 정작 검증 대상인 제약은 아무것도 지키지 못한다 —
+    // 위 복합 외래키 절과 같은 이유다.
+    const from = new Date('2026-09-01T00:00:00.000Z');
+    const until = new Date('2026-08-01T00:00:00.000Z'); // from보다 앞 — 뒤집힌 기간
+
+    /**
+     * 거절될 것으로 기대한 시도의 오류 객체를 돌려준다. `rejects.toThrow()`만 쓰면
+     * 오류 종류·코드를 단정할 수 없어(저장소 규약) 잡아서 돌려주는 형태로 만들었다.
+     */
+    async function captureRejection(attempt: Promise<unknown>): Promise<Error> {
+      try {
+        await attempt;
+      } catch (error) {
+        return error as Error;
+      }
+      throw new Error('거절될 것으로 기대한 시도가 성공했다');
+    }
+
+    /**
+     * CHECK 위반의 오류 형태를 단정한다. 드라이버 어댑터(`@prisma/adapter-pg`)가
+     * `23514`(check_violation)를 따로 매핑하지 않아 `PrismaClientKnownRequestError`
+     * 코드 `P2039`(Database error)로 감싸져 올라온다 — 아래 SQLSTATE·제약 이름
+     * 단정이 "다른 이유의 P2039"까지 걸러 낸다.
+     *
+     * **`meta.driverAdapterError.cause`의 구조까지 단정하는 이유**: Service의
+     * 409 변환(`todos.service.ts`)이 그 경로로 SQLSTATE와 제약 이름을 읽는데,
+     * 그쪽 단위 테스트는 이 형태를 흉내 낸 대역을 쓴다 — 실제 오류가 이 형태라는
+     * 사실은 DB에 붙는 여기서만 확인할 수 있다. Prisma가 이 구조를 바꾸면 조용히
+     * 변환이 멈추는 대신 이 테스트가 깨진다. 제약 이름은 구조화된 필드가 없어
+     * 메시지 문자열 안에만 있다(2026-08-08 실측, Prisma 7.9.1).
+     */
+    function expectActivePeriodCheckViolation(error: Error): void {
+      expect(error).toBeInstanceOf(Prisma.PrismaClientKnownRequestError);
+      const known = error as Prisma.PrismaClientKnownRequestError;
+      expect(known.code).toBe('P2039');
+      const cause = (
+        known.meta as {
+          driverAdapterError?: { cause?: { code?: string; message?: string } };
+        }
+      )?.driverAdapterError?.cause;
+      expect(cause?.code).toBe('23514');
+      expect(cause?.message).toContain('todo_template_active_period_check');
+    }
+
+    it('뒤집힌 기간은 직접 삽입해도 거절된다', async () => {
+      const error = await captureRejection(
+        prisma.todoTemplate.create({
+          data: {
+            userId,
+            title: '뒤집힌 활성 기간',
+            todoType: 'GENERAL',
+            completeType: 'DAILY',
+            activeFrom: from,
+            activeUntil: until,
+          },
+        }),
+      );
+
+      expectActivePeriodCheckViolation(error);
+    });
+
+    it('뒤집힌 기간은 직접 갱신해도 거절된다', async () => {
+      // 경쟁 패자가 실제로 지나는 경로가 UPDATE문이다 — 삽입과 갱신은 제약 검사
+      // 시점이 다른 문장이라 각각 고정한다.
+      const created = await prisma.todoTemplate.create({
+        data: {
+          userId,
+          title: '갱신으로 뒤집기',
+          todoType: 'GENERAL',
+          completeType: 'DAILY',
+          activeFrom: until,
+          activeUntil: from,
+        },
+      });
+
+      const error = await captureRejection(
+        prisma.todoTemplate.update({
+          where: { todoId: created.todoId },
+          data: { activeFrom: from, activeUntil: until },
+        }),
+      );
+
+      expectActivePeriodCheckViolation(error);
+    });
+
+    it('두 값이 같은 빈 기간도 거절된다', async () => {
+      // 판정이 반열림 구간(activeFrom <= 순간 < activeUntil)이라 두 값이 같으면
+      // 만족하는 순간이 없다. `assertShape`의 `>=` 거절과 같은 경계다 — 제약이
+      // `<`(등호 없음)이어야 이 경우까지 막는다.
+      const error = await captureRejection(
+        prisma.todoTemplate.create({
+          data: {
+            userId,
+            title: '빈 활성 기간',
+            todoType: 'GENERAL',
+            completeType: 'DAILY',
+            activeFrom: from,
+            activeUntil: from,
+          },
+        }),
+      );
+
+      expectActivePeriodCheckViolation(error);
+    });
+
+    it('한쪽이 NULL이면 저장된다 — 그쪽 제한이 없다는 뜻이다', async () => {
+      // NULL은 무제한이라 비교 대상이 아니다. 제약이 이 경우를 막으면 "기한 없이
+      // 계속되는" 정상 상태가 만들어질 수 없다.
+      const openEnded = await prisma.todoTemplate.create({
+        data: {
+          userId,
+          title: '상한 없는 활성 기간',
+          todoType: 'GENERAL',
+          completeType: 'DAILY',
+          activeFrom: from,
+          activeUntil: null,
+        },
+      });
+
+      expect(openEnded.activeFrom).toEqual(from);
+      expect(openEnded.activeUntil).toBeNull();
     });
   });
 });

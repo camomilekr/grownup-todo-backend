@@ -1,6 +1,6 @@
 # CONTEXT
 
-> 마지막 업데이트: 2026-08-05
+> 마지막 업데이트: 2026-08-08
 
 ## 역할
 
@@ -33,16 +33,19 @@ enum은 `CompleteType`(일회성 `ONCE`·매일 반복 `DAILY`)과 `TodoType`(�
 
 지운 기록도 이 제약의 대상이라 그 자리를 계속 차지한다. **한 번 지운 기록은 되살리지 않는다** — 완료 취소는 삭제가 아니라 `completed_at`을 비우는 수정이다.
 
-### Prisma가 표현하지 못해 SQL에 손으로 넣은 것 — 둘 다 `migrate diff`가 보지 못한다
+### Prisma가 표현하지 못해 SQL에 손으로 넣은 것 — 셋 다 `migrate diff`가 보지 못한다
 
-마이그레이션 SQL 맨 아래에 **RLS 블록과 코멘트 블록**이 손으로 들어가 있다. **마이그레이션을 다시 뽑을 때 반드시 두 블록을 옮겨 붙여라.**
+마이그레이션 SQL에 **RLS 블록·코멘트 블록·CHECK 제약**이 손으로 들어가 있다. **마이그레이션을 다시 뽑을 때 반드시 이 블록들을 옮겨 붙여라.**
 
 | | 왜 손으로 넣는가 | 빠지면 |
 |---|---|---|
 | `ENABLE ROW LEVEL SECURITY` × 4 — 세 테이블 + `_prisma_migrations`(이쪽만 `IF EXISTS`) | Prisma 스키마에 RLS 문법이 없다 | anon 키만으로 전 데이터가 열린다 (아래) |
 | `COMMENT ON TABLE` 3 + `COMMENT ON COLUMN` 32 | **Prisma의 `///` 주석은 DB로 가지 않는다** — 생성된 TS 클라이언트의 JSDoc으로만 들어간다 | psql·DataGrip·Supabase 대시보드에서 컬럼 이름만 보인다 |
+| `CHECK` 제약 `todo_template_active_period_check`(`20260807162419_active_period_check`) — 두 값이 모두 있으면 `active_from < active_until`, 등호 없음(반열림이라 같으면 빈 구간), NULL은 무제한이라 허용 | Prisma 스키마에 CHECK 문법이 없다 | `updateTodo`의 동시 수정 패자가 뒤집힌·빈 활성 기간을 저장한다 — 정상 경로는 `assertShape`가 400으로 먼저 막지만 읽기와 쓰기 사이에 잠금이 없다 |
 
-**`migrate diff`는 둘 중 어느 것도 비교하지 않는다.** 빠져도 `migrate status`·`migrate diff`·`verify`·나머지 테스트가 전부 초록으로 통과한다(drift 검사가 `No difference detected.`로 통과하는 것을 확인했다). **유일한 관문은 `test/schema-guard.e2e-spec.ts`다** — `public`을 훑어 RLS가 꺼진 테이블이나 코멘트 없는 테이블·컬럼이 하나라도 있으면 실패한다. **목록을 하드코딩하지 않았으므로 앞으로 추가하는 테이블·컬럼에도 자동으로 적용된다.**
+**`migrate diff`는 셋 중 어느 것도 비교하지 않는다.** 빠져도 `migrate status`·`migrate diff`·`verify`·나머지 테스트가 전부 초록으로 통과한다(drift 검사가 `No difference detected.`로 통과하는 것을 RLS·코멘트는 이전에, CHECK는 2026-08-08에 `--exit-code`로 실측했다). RLS와 코멘트의 관문은 `test/schema-guard.e2e-spec.ts`다 — `public`을 훑어 RLS가 꺼진 테이블이나 코멘트 없는 테이블·컬럼이 하나라도 있으면 실패한다. **목록을 하드코딩하지 않았으므로 앞으로 추가하는 테이블·컬럼에도 자동으로 적용된다.** CHECK의 관문은 `test/todos.e2e-spec.ts`의 "활성 기간 CHECK 제약" 절이다 — 제약이 빠진 DB에서는 직접 삽입·갱신이 거절되지 않아 실패한다.
+
+**CHECK 위반이 코드에 어떤 오류로 오는가(2026-08-08 실측, Prisma 7.9.1)**: `@prisma/adapter-pg`가 `23514`(check_violation)를 따로 매핑하지 않아 `PrismaClientKnownRequestError` 코드 **`P2039`**(Database error)로 감싸져 온다. SQLSTATE는 `meta.driverAdapterError.cause.code`(`'23514'`)에 구조화되어 있고, **제약 이름은 구조화된 필드가 없어 `cause.message` 문자열 안에만 있다.** `TodosService`의 409 변환이 그 경로로 판별한다.
 
 **RLS는 예외가 없다 — `_prisma_migrations`도 켠다.** 그 테이블도 default ACL로 `anon`에게 전권이 붙는데, 지워지면 다음 `migrate deploy`가 첫 마이그레이션을 재적용하려 들어 `CREATE TABLE`에서 깨지고, 가짜 행이 들어가면 적용되지 않은 마이그레이션이 조용히 건너뛰어진다.
 
