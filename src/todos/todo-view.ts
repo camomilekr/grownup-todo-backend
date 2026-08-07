@@ -136,9 +136,16 @@ type TodoTemplateView = {
  *
  * `progress`가 `null`이면 **아직 손대지 않았다**는 뜻이다. 기록은 완료하거나 진행값을
  * 입력할 때 비로소 생기므로 빈 객체로 바꾸면 그 구분이 사라진다.
+ *
+ * **`createdAt`이 `TodoTemplateView`가 아니라 여기에 있는 것은 의도다.** 병합 목록의
+ * 2차 정렬키로 필요해져 열었는데(사용자 확정), 요구가 목록에만 있다 — 공통 묶음에
+ * 넣으면 상세 두 갈래에도 새 필드가 나가고, 응답 필드는 한 번 나가면 클라이언트가
+ * 의존해 걷기 어렵다.
  */
 export type TodoListItem = TodoTemplateView & {
   completeType: CompleteType;
+  /** 정의의 생성 시각. 병합 목록에서 마감 동률의 2차 정렬키다 */
+  createdAt: Date;
   progress: TodoProgress | null;
 };
 
@@ -280,6 +287,7 @@ export function toTodoListItem(
   return {
     ...toTemplateView(template),
     completeType: template.completeType,
+    createdAt: template.createdAt,
     progress: toProgress(history),
   };
 }

@@ -207,6 +207,21 @@ export class TodosService {
    */
   async listDailyOn(userId: bigint, at: Date): Promise<TodoListItem[]> {
     const timeZone = await this.readTimeZone(userId);
+
+    return this.listDailyAt(userId, at, timeZone);
+  }
+
+  /**
+   * `listDailyOn`의 본문. 타임존을 **인자로 받는** 이유는 부르는 자리가 둘이기
+   * 때문이다 — 공개 `listDailyOn`은 여기 오기 전에 읽고, `listTodosOn`은 한 번
+   * 읽은 값을 마감 계산과 함께 쓴다. 안에서 읽으면 병합 목록이 유저 조회를 두 번
+   * 하게 되고, 그 목록은 요청마다 도는 경로라 지속 비용이다.
+   */
+  private async listDailyAt(
+    userId: bigint,
+    at: Date,
+    timeZone: string,
+  ): Promise<TodoListItem[]> {
     const rows = await this.templates.findDailyActiveAt(
       userId,
       at,
@@ -217,22 +232,20 @@ export class TodosService {
   }
 
   /**
-   * 두 목록(`listOnce`·`listDailyOn`과 같은 조회 조건)을 병합해 **마감 순간
-   * 오름차순** 한 배열로 돌려준다(사용자 확정 — "완료일이 가까운 순"). 마감은
-   * 일회성이 예정일(`shouldDoAt`), 매일 반복이 유저 타임존에서 다음 달력 날짜가
-   * 시작되는 최초의 순간이고, 예정일 없는 일회성은 마감 없음으로 맨 뒤·만든 순이다
-   * (`sortTodosByDeadline`).
+   * 두 목록을 병합해 **마감 순간 오름차순** 한 배열로 돌려준다(사용자 확정 —
+   * "완료일이 가까운 순"). 마감은 일회성이 예정일(`shouldDoAt`), 매일 반복이 유저
+   * 타임존에서 다음 달력 날짜가 시작되는 최초의 순간이고, 예정일 없는 일회성은
+   * 마감 없음으로 맨 뒤·만든 순이다(`sortTodosByDeadline`).
    *
-   * **기존 두 목록 메서드를 재사용하지 않고 Repository를 직접 부른다.** 이유가
-   * 둘이다. 하나는 정렬이 행 수준에서만 가능하다는 것 — `TodoListItem`에는 2차
-   * 정렬키(`createdAt`)가 없어서 변환 뒤에는 동률의 순서를 정할 수 없다. 다른
-   * 하나는 타임존 조회의 중복 — `listDailyOn`이 안에서 타임존을 읽으므로
-   * 재사용하면 두 번 읽게 되는데, 여기서는 한 번 읽어 날짜 키와 마감 계산에 함께
-   * 쓴다.
+   * **서비스 레이어를 재사용한다**(사용자 확정 — "비지니스 로직의 중복은 최대한
+   * 피하는게 좋다"). 목록 규칙(행→항목 변환, 붙는 기록이 0개 또는 1개라는 전제)이
+   * `listOnce`와 `listDailyAt` 한 곳에만 살고, 여기는 병합과 정렬만 얹는다. 정렬이
+   * 응답 항목 수준에서 되는 것은 `TodoListItem`에 2차 정렬키(`createdAt`)가 있어서다
+   * — 병합 목록을 위해 목록 응답에만 연 필드다(`todo-view.ts`).
    *
-   * **하나의 `at`에서 세 값이 나온다.** 활성 판정에는 그대로, 붙일 기록을 찾는
-   * 데는 유저 타임존 기준 날짜 키로, 매일 반복의 마감에는 다음 달력 날짜의 시작
-   * 순간으로. 다른 순간에서 만들면 목록·기록·마감이 서로 다른 시점을 말하게 된다.
+   * **타임존은 한 번만 읽는다.** `listDailyOn` 대신 본문(`listDailyAt`)에 위임하는
+   * 이유다 — 공개 메서드를 부르면 그 안의 타임존 조회가 여기 것과 중복된다. 읽은
+   * 값은 위임과 마감 계산(`toNextLocalDayStart`)에 함께 쓴다.
    *
    * **완료 여부는 순서에 반영하지 않는다**(사용자 확정). 완료된 일회성은 쿼리가
    * 이미 제외하고, 완료된 매일 반복을 뒤로 보내면 완료 토글마다 목록이 재배열되어
@@ -245,24 +258,15 @@ export class TodosService {
     const timeZone = await this.readTimeZone(userId);
 
     // 두 조회는 서로를 기다릴 이유가 없다. 순차 `await`는 대기 시간을 더한다.
-    const [onceRows, dailyRows] = await Promise.all([
-      this.templates.findOnceWithoutCompletedHistory(userId),
-      this.templates.findDailyActiveAt(
-        userId,
-        at,
-        toLocalDateKey(at, timeZone),
-      ),
+    const [onceItems, dailyItems] = await Promise.all([
+      this.listOnce(userId),
+      this.listDailyAt(userId, at, timeZone),
     ]);
 
-    // 정렬이 변환보다 앞이다 — 2차 정렬키(`createdAt`)가 행에만 있다.
-    const sorted = sortTodosByDeadline(
-      [...onceRows, ...dailyRows],
+    return sortTodosByDeadline(
+      [...onceItems, ...dailyItems],
       toNextLocalDayStart(at, timeZone),
     );
-
-    // 붙어 오는 기록은 0개 또는 1개다(근거는 Repository 주석에 있다). 비어 있으면
-    // `undefined`가 넘어가는데 `toTodoListItem`이 그것을 "없음"으로 받는다.
-    return sorted.map((row) => toTodoListItem(row, row.histories[0]));
   }
 
   /**

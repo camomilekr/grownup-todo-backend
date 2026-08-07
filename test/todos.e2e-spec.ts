@@ -1307,6 +1307,10 @@ describe('Todos Repository (e2e)', () => {
         noDueFirst.todoId,
         noDueSecond.todoId,
       ]);
+      // 목록 항목이 정의의 생성 시각을 내보낸다 — 병합 목록의 2차 정렬키로 열어 둔
+      // 필드다(사용자 확정). 같은 픽스처를 다시 만들지 않으려고 순서 단정과 한
+      // 테스트에 둔다.
+      expect(items[0]?.createdAt).toEqual(overdueOnce.createdAt);
     });
   });
 

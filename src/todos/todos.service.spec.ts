@@ -346,8 +346,10 @@ describe('TodosService', () => {
 
     it('유저 타임존을 한 번만 읽는다', async () => {
       // 날짜 키와 마감 계산이 둘 다 타임존을 쓰지만 조회는 한 번이어야 한다 —
-      // 기존 두 목록 메서드를 재사용하지 않고 Repository를 직접 부르는 이유의
-      // 하나가 이 중복 제거다.
+      // 그래서 `listDailyOn`의 본문이 타임존을 인자로 받는 내부 공통
+      // 경로(`listDailyAt`)로 나뉘어 있고, 공개 메서드와 이 조합 메서드가 그것을
+      // 함께 쓴다. 공개 `listDailyOn`을 재사용하는 변경(안에서 타임존을 또
+      // 읽는다)이 이 단정에서 잡힌다.
       templates.findOnceWithoutCompletedHistory.mockResolvedValue([]);
       templates.findDailyActiveAt.mockResolvedValue([]);
 

@@ -3,11 +3,12 @@
 import type { CompleteType } from '../generated/prisma/enums';
 
 /**
- * 정렬이 읽는 필드만 요구하는 형태. `TodoTemplateWithHistories`가 이것을 만족한다.
+ * 정렬이 읽는 필드만 요구하는 형태. 병합 목록(`listTodosOn`)이 넘기는
+ * `TodoListItem`이 이것을 만족한다 — 2차 정렬키(`createdAt`)가 목록 응답에 있어서
+ * (사용자 확정으로 열었다, `todo-view.ts`) 변환 뒤의 항목 수준에서 정렬한다.
  *
- * **`TodoListItem`이 아니라 행 수준을 받는 이유** — 밖으로 내보내는 형태에는
- * `createdAt`이 없어서(응답에 실을 이유가 없는 값이다) 변환 뒤에는 2차 정렬을 할 수
- * 없다. 정렬 구현의 사정으로 응답 형태에 필드를 늘리는 대신, 정렬을 변환 앞에 둔다.
+ * 구조 타입이라 넷을 가진 형태면 무엇이든 받는다. 목록 항목에 묶지 않은 것은 이
+ * 파일이 응답 형태의 사정과 무관한 순수 정렬로 남게 하려는 것이다.
  */
 export type TodoOrderSource = {
   todoId: bigint;
@@ -18,21 +19,21 @@ export type TodoOrderSource = {
 };
 
 /**
- * 한 행의 마감 순간. 일회성은 예정일이고, 매일 반복은 인자로 받은 순간이다 —
+ * 한 항목의 마감 순간. 일회성은 예정일이고, 매일 반복은 인자로 받은 순간이다 —
  * 그 계산(유저 타임존에서 다음 달력 날짜가 시작되는 최초의 순간, `toNextLocalDayStart`)
  * 은 타임존을 아는 쪽(Service)의 몫이라 이 파일은 결과만 받는다.
  *
  * `null`은 마감 없음이다 — 예정일 없는 일회성이 그 경우이고 정렬에서 맨 뒤로 간다.
  */
 function resolveDeadline(
-  row: TodoOrderSource,
+  item: TodoOrderSource,
   dailyDeadline: Date,
 ): Date | null {
-  return row.completeType === 'DAILY' ? dailyDeadline : row.shouldDoAt;
+  return item.completeType === 'DAILY' ? dailyDeadline : item.shouldDoAt;
 }
 
 /** `bigint`는 빼기로 비교할 수 없다 — `sort` 비교자는 `number`를 요구하는데
- * `bigint - bigint`는 `bigint`고, `Number`로 바꾸면 2^53 위에서 서로 다른 행이
+ * `bigint - bigint`는 `bigint`고, `Number`로 바꾸면 2^53 위에서 서로 다른 항목이
  * 같은 값이 된다. 그래서 명시적 대소 비교다. */
 function compareBigint(a: bigint, b: bigint): number {
   if (a < b) {
@@ -46,7 +47,7 @@ function compareBigint(a: bigint, b: bigint): number {
 }
 
 /**
- * 할 일 행들을 **마감 순간 오름차순**으로 늘어놓은 새 배열을 돌려준다. 일회성과
+ * 할 일 항목들을 **마감 순간 오름차순**으로 늘어놓은 새 배열을 돌려준다. 일회성과
  * 매일 반복을 하나의 목록으로 합쳐 보여 줄 때의 순서다(사용자 확정 — "완료일이
  * 가까운 순").
  *
@@ -60,7 +61,7 @@ function compareBigint(a: bigint, b: bigint): number {
  *    합치기 전 화면과 일치하고, 유일 키가 마지막에 있어 순서가 결정적이다
  *
  * **원본을 바꾸지 않는다.** `Array.prototype.sort`는 제자리 정렬이라 복사 후
- * 정렬한다 — Repository가 돌려준 배열이 부르는 쪽 몰래 재배열되면 안 된다.
+ * 정렬한다 — 부르는 쪽이 넘긴 배열이 몰래 재배열되면 안 된다.
  *
  * **완료 여부는 반영하지 않는다**(사용자 확정). 완료된 매일 반복을 뒤로 보내면
  * 완료 토글마다 목록이 재배열되어 화면이 튄다 — 화면이 `progress.isCompleted`로
@@ -70,10 +71,10 @@ function compareBigint(a: bigint, b: bigint): number {
  *   시작되는 최초의 순간이고, 부르는 쪽이 `toNextLocalDayStart`로 만든다
  */
 export function sortTodosByDeadline<T extends TodoOrderSource>(
-  rows: readonly T[],
+  items: readonly T[],
   dailyDeadline: Date,
 ): T[] {
-  return [...rows].sort((a, b) => {
+  return [...items].sort((a, b) => {
     const aDeadline = resolveDeadline(a, dailyDeadline);
     const bDeadline = resolveDeadline(b, dailyDeadline);
 

@@ -266,6 +266,15 @@ describe('toTodoListItem', () => {
     expect(item.progress?.targetValue).toBe(100);
   });
 
+  it('정의의 생성 시각을 createdAt으로 내보낸다', () => {
+    // 병합 목록의 2차 정렬키다(사용자 확정 — "createdAt이 없으면 모델에 추가하면
+    // 되는거 아냐?"). 목록 항목에 이 값이 없으면 변환 뒤에는 동률(특히 매일 반복
+    // 전체)의 순서를 정할 수 없다.
+    const item = toTodoListItem(createTemplate(), null);
+
+    expect(item.createdAt).toEqual(CREATED_AT);
+  });
+
   it('소유자 번호와 삭제 시각을 내보내지 않는다', () => {
     // 자기 것만 조회하므로 소유자 번호는 쓸 데가 없고, 응답에 다른 유저의 번호가
     // 새는 경로를 구조적으로 없앤다. 삭제 시각은 밖에서 알 필요가 없는 내부 상태다.
@@ -304,6 +313,15 @@ describe('toOnceTodoDetail', () => {
 
     expect(detail).not.toHaveProperty('historiedOn');
     expect(detail.progress).not.toHaveProperty('historiedOn');
+  });
+
+  it('createdAt을 내보내지 않는다', () => {
+    // `createdAt`은 목록(`TodoListItem`)에만 연 필드다 — 정렬 요구가 목록에만
+    // 있고, 응답 필드는 한 번 나가면 클라이언트가 의존해 걷기 어렵다. 상세 두
+    // 갈래로 새는 경로가 생기면 여기서 깨진다.
+    expect(
+      toOnceTodoDetail(createOnceTemplate(), createHistory()),
+    ).not.toHaveProperty('createdAt');
   });
 
   it('매일 반복 정의를 넣으면 컴파일 단계에서 막힌다', () => {
@@ -361,6 +379,13 @@ describe('toDailyTodoDetail', () => {
     expect(
       toDailyTodoDetail(createDailyTemplate(), [createHistory()]),
     ).not.toHaveProperty('progress');
+  });
+
+  it('createdAt을 내보내지 않는다', () => {
+    // 일회성 상세와 같은 근거다 — 목록에만 연 필드가 상세로 새지 않아야 한다.
+    expect(
+      toDailyTodoDetail(createDailyTemplate(), [createHistory()]),
+    ).not.toHaveProperty('createdAt');
   });
 
   it('일회성 정의를 넣으면 컴파일 단계에서 막힌다', () => {
