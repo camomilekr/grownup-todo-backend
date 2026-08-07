@@ -56,6 +56,18 @@ TypeError: Do not know how to serialize a BigInt
 
 **`Number`로 바꾸지 마라.** 2^53을 넘는 기본키에서 정밀도가 깨져 다른 행을 가리키는 id가 나간다.
 
+## 실패한 단정의 `bigint` diff는 워커가 보여 주지 못한다
+
+`toEqual` 같은 단정에 `bigint`(또는 그것을 담은 배열·객체)를 쓰는 테스트가 **실패**하면, 워커 모드에서는 무엇이 어떻게 달랐는지 대신 이것만 나온다.
+
+```
+TypeError: Do not know how to serialize a BigInt
+```
+
+jest-worker가 실패 결과를 부모 프로세스로 보내며 직렬화하는 자리(`messageParent`)가 `bigint`를 다루지 못하기 때문이다. **통과할 때는 아무 문제가 없다** — 실패해야 비로소 터지는 종류라, 정작 diff가 필요한 순간에만 가려진다. 위의 `JSON.stringify` 함정과 원인 계층이 다르다 — 저쪽은 애플리케이션 직렬화이고 이쪽은 jest 내부라 `BigIntJsonModule`로도 막을 수 없다.
+
+**`--runInBand`를 붙여 다시 돌리면 실제 diff가 보인다** (`npm run test:e2e -- --runInBand`). 워커 없이 한 프로세스에서 돌아 직렬화 경계 자체가 없다. 기본키가 전부 `BIGSERIAL`이라 이 저장소의 e2e에 이 패턴이 많다 — e2e 실패 출력이 위 문구뿐이면 테스트를 고치기 전에 먼저 이것으로 원인을 봐라. (병합 목록 e2e의 변이 검증 중에 실측한 함정이다.)
+
 ## `@db.Date` 컬럼은 UTC 기준으로 저장된다
 
 `@db.Date`에 넘긴 `Date`를 어댑터가 **UTC 컴포넌트로** 직렬화한다. `@prisma/adapter-pg` 패키지의 `formatDate`가 `getUTCFullYear`·`getUTCMonth`·`getUTCDate`를 쓰기 때문이다(확인 시점 7.9.1, 설치본의 `dist/index.js`). 여기서도 경로보다 **함수 이름과 이 세 호출을 검색어로 삼아라.**
