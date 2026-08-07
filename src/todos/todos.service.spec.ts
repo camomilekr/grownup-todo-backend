@@ -1,4 +1,8 @@
-import { BadRequestException, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  ConflictException,
+  NotFoundException,
+} from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { Prisma } from '../generated/prisma/client';
 import type { TodoHistory, TodoTemplate } from '../generated/prisma/client';
@@ -1111,6 +1115,150 @@ describe('TodosService', () => {
       await expect(
         service.updateTodo(USER_ID, 1n, { title: '바꾼 뒤' }),
       ).rejects.toBe(conflict);
+    });
+
+    describe('활성 기간 CHECK 위반의 409 변환', () => {
+      /**
+       * 활성 기간 CHECK 제약 위반이 코드에 도착하는 실측 형태를 흉내 낸다
+       * (2026-08-08, Prisma 7.9.1 — `test/todos.e2e-spec.ts`의 "활성 기간 CHECK
+       * 제약" 절이 실제 DB에서 이 형태를 고정한다). 어댑터가 `23514`
+       * (check_violation)를 따로 매핑하지 않아 `P2039`(Database error)로 감싸지고,
+       * SQLSTATE는 `meta.driverAdapterError.cause.code`에 구조화되어 있으며 제약
+       * 이름은 `cause.message` 문자열 안에만 있다.
+       */
+      function createCheckViolation(
+        constraint: string,
+      ): Prisma.PrismaClientKnownRequestError {
+        const message = `new row for relation "todo_template" violates check constraint "${constraint}"`;
+
+        return new Prisma.PrismaClientKnownRequestError(
+          `Database error. Code: \`23514\`. Message: \`${message}\``,
+          {
+            code: 'P2039',
+            clientVersion: 'test',
+            meta: {
+              modelName: 'TodoTemplate',
+              driverAdapterError: {
+                cause: { kind: 'postgres', code: '23514', message },
+              },
+            },
+          },
+        );
+      }
+
+      it('활성 기간 제약 위반이면 ConflictException(409)이다', async () => {
+        // 이 위반에 도달하는 경로는 경쟁 창 하나뿐이다 — 정상 경로는 `assertShape`가
+        // 먼저 400으로 거절한다. 패자의 요청도 단독으로는 유효했으므로 400도 500도
+        // 사실과 다르고, 동시 수정과 충돌했으니 다시 읽고 시도하라는 409가 맞다.
+        templates.findById.mockResolvedValue(
+          createTemplate({ completeType: 'DAILY' }),
+        );
+        templates.update.mockRejectedValue(
+          createCheckViolation('todo_template_active_period_check'),
+        );
+
+        await expect(
+          service.updateTodo(USER_ID, 1n, {
+            activeFrom: parseLocalDateKey('2026-08-01'),
+          }),
+        ).rejects.toThrow(ConflictException);
+      });
+
+      it('409 메시지에 제약 이름과 내부 코드를 싣지 않는다', async () => {
+        // 제약 이름과 SQLSTATE는 스키마 내부 사정이다 — 응답에 실으면 클라이언트가
+        // 그 문자열에 의존해 스키마 변경이 API 변경이 된다.
+        templates.findById.mockResolvedValue(
+          createTemplate({ completeType: 'DAILY' }),
+        );
+        templates.update.mockRejectedValue(
+          createCheckViolation('todo_template_active_period_check'),
+        );
+
+        const thrown = await service
+          .updateTodo(USER_ID, 1n, {
+            activeFrom: parseLocalDateKey('2026-08-01'),
+          })
+          .then(
+            () => null,
+            (error: Error) => error,
+          );
+
+        expect(thrown).toBeInstanceOf(ConflictException);
+        expect(thrown?.message).not.toContain(
+          'todo_template_active_period_check',
+        );
+        expect(thrown?.message).not.toContain('23514');
+        expect(thrown?.message).not.toContain('P2039');
+      });
+
+      it('다른 제약의 CHECK 위반은 그대로 던진다', async () => {
+        // 이 제약 하나만 정확히 판별한다 — 다른 CHECK까지 409로 합치면 나중에 다른
+        // 제약이 생겼을 때 그 위반의 원인이 "동시 수정 충돌"로 위장한다.
+        const otherViolation = createCheckViolation('some_other_check');
+        templates.findById.mockResolvedValue(
+          createTemplate({ completeType: 'DAILY' }),
+        );
+        templates.update.mockRejectedValue(otherViolation);
+
+        await expect(
+          service.updateTodo(USER_ID, 1n, {
+            activeFrom: parseLocalDateKey('2026-08-01'),
+          }),
+        ).rejects.toBe(otherViolation);
+      });
+
+      it('이 제약 이름을 접두사로 갖는 다른 제약의 위반도 그대로 던진다', async () => {
+        // 판별이 메시지의 부분 문자열 검사라, 따옴표 없이 이름만 찾으면 이 이름을
+        // 접두사로 갖는 제약(`…_check_v2` 같은)의 위반까지 409로 변환된다 — 위의
+        // `some_other_check` 갈래는 이름이 아예 달라 이 회귀를 잡지 못한다.
+        // Postgres 메시지는 제약 이름을 따옴표로 감싸므로(실측) 따옴표까지 포함해
+        // 찾으면 접두사 겹침이 걸러진다.
+        const prefixedViolation = createCheckViolation(
+          'todo_template_active_period_check_v2',
+        );
+        templates.findById.mockResolvedValue(
+          createTemplate({ completeType: 'DAILY' }),
+        );
+        templates.update.mockRejectedValue(prefixedViolation);
+
+        await expect(
+          service.updateTodo(USER_ID, 1n, {
+            activeFrom: parseLocalDateKey('2026-08-01'),
+          }),
+        ).rejects.toBe(prefixedViolation);
+      });
+
+      it('SQLSTATE가 다른 P2039는 그대로 던진다', async () => {
+        // P2039는 "어댑터가 따로 매핑하지 않은 DB 오류" 전부를 담는 코드라 그것만
+        // 보면 무관한 장애까지 409가 된다 — SQLSTATE까지 봐야 CHECK 위반이다.
+        const otherDatabaseError = new Prisma.PrismaClientKnownRequestError(
+          'Database error. Code: `40001`. Message: `serialization failure`',
+          {
+            code: 'P2039',
+            clientVersion: 'test',
+            meta: {
+              modelName: 'TodoTemplate',
+              driverAdapterError: {
+                cause: {
+                  kind: 'postgres',
+                  code: '40001',
+                  message: 'serialization failure',
+                },
+              },
+            },
+          },
+        );
+        templates.findById.mockResolvedValue(
+          createTemplate({ completeType: 'DAILY' }),
+        );
+        templates.update.mockRejectedValue(otherDatabaseError);
+
+        await expect(
+          service.updateTodo(USER_ID, 1n, {
+            activeFrom: parseLocalDateKey('2026-08-01'),
+          }),
+        ).rejects.toBe(otherDatabaseError);
+      });
     });
   });
 

@@ -359,7 +359,8 @@ updateTodo(userId: bigint, todoId: bigint, input: UpdateTodoInput): Promise<void
 | `NotFoundException`    | 그런 할 일이 없거나 남의 것이거나 이미 지워졌을 때 (고치기 전에 읽는 단계에서 걸린다)                       |
 | `NotFoundException`    | 읽은 뒤 쓰기 사이에 그 할 일이 지워졌을 때. Prisma의 `P2025`(고칠 행을 찾지 못했다)를 바꾼 것이다            |
 | `BadRequestException`  | **바뀐 뒤의 형태**가 위 다섯 규칙 중 하나에 걸릴 때                                                         |
-| Prisma 오류            | `P2025` 밖의 오류는 바꾸지 않고 그대로 올린다                                                               |
+| `ConflictException`    | 읽은 뒤 쓰기 사이에 다른 요청이 반대쪽 활성 기간 필드를 고쳐, 저장하려는 기간이 뒤집히거나 비었을 때. DB의 CHECK 제약(`todo_template_active_period_check`) 위반을 바꾼 것이다 — 이 위반에 도달하는 경로는 동시 수정의 경쟁 창 하나뿐이고, 패자의 요청도 단독으로는 유효했으므로 400도 500도 아니다. 다시 조회한 뒤 시도하면 된다. 응답 메시지에 제약 이름·내부 코드는 싣지 않는다 |
+| Prisma 오류            | `P2025`와 위 CHECK 위반 밖의 오류는 바꾸지 않고 그대로 올린다                                               |
 
 ### `deleteTodo`
 

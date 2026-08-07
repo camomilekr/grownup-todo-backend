@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ConflictException,
   Injectable,
   Logger,
   NotFoundException,
@@ -129,19 +130,41 @@ type TodoShape = {
 const PRISMA_RECORD_NOT_FOUND = 'P2025';
 
 /**
+ * Prisma가 **어댑터가 따로 매핑하지 않은 DB 오류**에 붙이는 코드(Database error).
+ * CHECK 제약 위반이 여기로 온다 — `@prisma/adapter-pg`가 `23514`를 매핑하지 않아서다.
+ * 이 코드 하나로는 무관한 장애와 구분되지 않으므로 반드시 SQLSTATE까지 본다.
+ */
+const PRISMA_DATABASE_ERROR = 'P2039';
+
+/** Postgres가 CHECK 제약 위반에 붙이는 SQLSTATE(check_violation) */
+const POSTGRES_CHECK_VIOLATION = '23514';
+
+/**
+ * 활성 기간의 뒤집힌·빈 구간을 막는 CHECK 제약 이름
+ * (마이그레이션 `20260807162419_active_period_check`)
+ */
+const ACTIVE_PERIOD_CHECK_CONSTRAINT = 'todo_template_active_period_check';
+
+/**
  * 값이 `undefined`인 키를 뺀 객체를 만든다.
  *
  * 고치기에서 `undefined`는 "그대로 두라"는 뜻이다. Prisma도 `undefined` 필드를 무시하므로
  * 동작은 같지만, **키 자체를 없애 두면 무엇을 고치는 요청인지가 넘기는 값에 그대로
  * 드러난다** — 의도하지 않은 필드가 섞였는지 로그와 테스트에서 눈으로 확인할 수 있다.
+ *
+ * **반환이 `T`가 아니라 `Partial<T>`인 것이 사실이다** — 키를 제거하는 함수라 어떤
+ * 키든 결과에서 빠져 있을 수 있고, `T`로 돌려주면 필수 키를 가진 타입에 재사용됐을 때
+ * 그 키가 있다고 거짓말을 하게 된다. 지금의 호출부(`updateTodo`)는 전 필드가 옵셔널인
+ * `UpdateTodoTemplateInput`을 넘기므로 `Partial`이어도 그대로 대입된다.
  */
-function omitUndefined<T extends object>(source: T): T {
-  // `Object.fromEntries`의 반환 타입은 인덱스 시그니처라 원래 타입으로 되돌릴 방법이
-  // 없다. 키를 빼기만 하고 값은 손대지 않으므로 `T`가 유지되는 것은 이 함수 안에서
-  // 확인된다 — 그래서 이 단정은 밖으로 새지 않는다.
+function omitUndefined<T extends object>(source: T): Partial<T> {
+  // `Object.fromEntries`의 반환 타입은 인덱스 시그니처라 원래 키 타입으로 되돌릴
+  // 방법이 없어 단언이 남는다. 다만 이 단언은 사실이다 — 키를 빼기만 하고 값은
+  // 손대지 않으므로 결과는 언제나 `T`의 부분집합이고, `Partial<T>`가 정확히 그
+  // 사실("어떤 키든 빠져 있을 수 있다")을 말한다.
   return Object.fromEntries(
     Object.entries(source).filter(([, value]) => value !== undefined),
-  ) as T;
+  ) as Partial<T>;
 }
 
 /**
@@ -457,7 +480,7 @@ export class TodosService {
     try {
       await this.templates.update(userId, todoId, data);
     } catch (error) {
-      throw this.toTodoNotFound(error, todoId);
+      throw this.toUpdateTodoError(error, todoId);
     }
   }
 
@@ -765,6 +788,79 @@ export class TodosService {
         '활성 기간이 비어 있다 — 시작 순간이 상한 순간보다 앞서야 한다',
       );
     }
+  }
+
+  /**
+   * 고치기가 실패했을 때 던질 오류를 고른다. `toTodoNotFound`에 한 갈래가 얹힌
+   * 형태다 — **활성 기간 CHECK 제약 위반만 `ConflictException`(409)으로 바꾼다.**
+   *
+   * 그 위반에 도달하는 경로는 **동시 수정의 경쟁 창 하나뿐이다.** 정상 경로는
+   * `assertShape`가 먼저 400으로 거절하고, `createTodo`는 스냅샷 하나로 검증하므로
+   * 경쟁 자체가 없다 — 그래서 만들기 쪽에는 이 변환이 없다(도달하지 않는 분기를
+   * 두면 그것이 무엇을 막는지 아무도 확인할 수 없다). 남는 것은 읽기와 쓰기 사이에
+   * 반대쪽 활성 기간 필드가 고쳐진 경우인데, 패자의 요청도 단독으로는 유효했으므로
+   * "네 요청이 잘못됐다"(400)도 "서버 장애"(500)도 사실과 다르다 — 동시 수정과
+   * 충돌했으니 다시 읽고 시도하라는 409가 맞다.
+   *
+   * **응답 메시지에 제약 이름과 내부 코드를 싣지 않는다.** 스키마 내부 사정이라
+   * 실으면 클라이언트가 그 문자열에 의존해 스키마 변경이 API 변경이 된다.
+   *
+   * **이 제약 하나만 정확히 판별한다**(`isActivePeriodCheckViolation`). 다른
+   * 오류를 함께 바꾸면 진짜 장애가 "동시 수정 충돌"로 위장한다 — `toTodoNotFound`가
+   * `P2025` 밖을 바꾸지 않는 것과 같은 규칙이다.
+   */
+  private toUpdateTodoError(error: unknown, todoId: bigint): unknown {
+    if (this.isActivePeriodCheckViolation(error)) {
+      // 원인 파악에 필요한 내부 사정(제약 이름·코드)은 응답 대신 로그에 남긴다.
+      // 클라이언트가 대상을 잘못 가리킨 것이 아니라 타이밍이 겹친 것이므로 `warn`이다.
+      this.logger.warn(
+        `활성 기간 CHECK 제약 위반 — 동시 수정 충돌 (todoId=${todoId})`,
+      );
+
+      return new ConflictException(
+        '다른 요청이 같은 할 일을 동시에 고쳐 활성 기간이 어긋났다 — 다시 조회한 뒤 시도해라',
+      );
+    }
+
+    return this.toTodoNotFound(error, todoId);
+  }
+
+  /**
+   * 활성 기간 CHECK 제약(`todo_template_active_period_check`) 위반인지 판별한다.
+   *
+   * 형태는 e2e 실측이다(2026-08-08, Prisma 7.9.1 — `test/todos.e2e-spec.ts`의
+   * "활성 기간 CHECK 제약" 절이 실제 DB에서 고정한다). 어댑터가 `23514`를 따로
+   * 매핑하지 않아 `P2039`로 감싸지고, SQLSTATE는 `meta.driverAdapterError.cause.code`
+   * 에 구조화되어 있으며 **제약 이름은 구조화된 필드가 없어 `cause.message` 문자열
+   * 안에만 있다** — 문자열 포함 검사가 남는 이유다. 그 메시지는 우리가 다듬는
+   * 문구가 아니라 Postgres가 만드는 문장이라 "메시지로 구분하면 문구를 다듬는
+   * 순간 깨진다"는 규칙의 대상이 아니다.
+   */
+  private isActivePeriodCheckViolation(error: unknown): boolean {
+    if (
+      !(error instanceof Prisma.PrismaClientKnownRequestError) ||
+      error.code !== PRISMA_DATABASE_ERROR
+    ) {
+      return false;
+    }
+
+    // `meta`의 구조를 Prisma가 타입으로 약속하지 않아 좁혀 읽는다. 어느 단계가
+    // 비어 있어도 `false`로 떨어져야 하므로 전 단계에 옵셔널 체이닝을 건다.
+    const cause = (
+      error.meta as {
+        driverAdapterError?: { cause?: { code?: string; message?: string } };
+      }
+    )?.driverAdapterError?.cause;
+
+    return (
+      cause?.code === POSTGRES_CHECK_VIOLATION &&
+      typeof cause.message === 'string' &&
+      // 따옴표까지 포함해 찾는다. Postgres 메시지가 제약 이름을 따옴표로 감싸므로
+      // (실측: violates check constraint "todo_template_active_period_check")
+      // 이름만 찾으면 이 이름을 접두사로 갖는 다른 제약(`…_check_v2` 같은)의
+      // 위반까지 걸린다 — 따옴표가 이름의 끝을 못 박는다.
+      cause.message.includes(`"${ACTIVE_PERIOD_CHECK_CONSTRAINT}"`)
+    );
   }
 
   /**
