@@ -273,6 +273,128 @@ describe('TodosService', () => {
     });
   });
 
+  describe('listTodosOn', () => {
+    /**
+     * 서울 8월 2일 14:00에 해당하는 기준 순간이다. 매일 반복의 마감은 유저
+     * 타임존에서 다음 달력 날짜(8월 3일)가 시작되는 최초의 순간 =
+     * `2026-08-02T15:00:00Z`가 된다.
+     */
+    const at = new Date('2026-08-02T05:00:00.000Z');
+
+    // 일회성 픽스처들. 일회성에는 활성 기간을 둘 수 없으므로(`assertShape`)
+    // 저장된 값이 그 규칙을 지킨다는 전제를 픽스처가 어기지 않게 비워 둔다.
+    const overdueOnce = withHistories(
+      createTemplate({
+        todoId: 1n,
+        completeType: 'ONCE',
+        activeFrom: null,
+        // 매일 반복의 마감(서울 8월 3일 0시)보다 앞이다 — 연체된 일회성.
+        shouldDoAt: new Date('2026-07-20T09:00:00.000Z'),
+      }),
+    );
+    const futureOnce = withHistories(
+      createTemplate({
+        todoId: 3n,
+        completeType: 'ONCE',
+        activeFrom: null,
+        // 매일 반복의 마감보다 뒤다 — 아직 여유 있는 일회성.
+        shouldDoAt: new Date('2026-09-01T09:00:00.000Z'),
+      }),
+    );
+    const noDueOnce = withHistories(
+      createTemplate({
+        todoId: 4n,
+        completeType: 'ONCE',
+        activeFrom: null,
+        shouldDoAt: null,
+      }),
+    );
+    const daily = withHistories(createTemplate({ todoId: 2n }));
+
+    it('두 목록을 병합해 마감 순간 오름차순 한 배열로 돌려준다', async () => {
+      // 각 조회 안의 순서(만든 순)가 아니라 **마감 순**이 최종 순서다 — 연체
+      // 일회성 < 매일 반복(오늘 마감) < 미래 일회성 < 예정일 없는 일회성.
+      templates.findOnceWithoutCompletedHistory.mockResolvedValue([
+        noDueOnce,
+        futureOnce,
+        overdueOnce,
+      ]);
+      templates.findDailyActiveAt.mockResolvedValue([daily]);
+
+      const items = await service.listTodosOn(USER_ID, at);
+
+      expect(items.map((item) => item.todoId)).toEqual([1n, 2n, 3n, 4n]);
+    });
+
+    it('활성 판정에는 요청 순간을 그대로, 기록에는 유저 타임존 기준 날짜를 넘긴다', async () => {
+      // `listDailyOn`과 같은 계약이다 — 같은 `at`에서 두 값이 나와야 "활성인
+      // 목록"과 "그날의 기록"이 같은 시점을 말한다.
+      templates.findOnceWithoutCompletedHistory.mockResolvedValue([]);
+      templates.findDailyActiveAt.mockResolvedValue([]);
+
+      await service.listTodosOn(USER_ID, at);
+
+      expect(templates.findOnceWithoutCompletedHistory).toHaveBeenCalledWith(
+        USER_ID,
+      );
+      expect(templates.findDailyActiveAt).toHaveBeenCalledWith(
+        USER_ID,
+        at,
+        parseLocalDateKey('2026-08-02'),
+      );
+    });
+
+    it('유저 타임존을 한 번만 읽는다', async () => {
+      // 날짜 키와 마감 계산이 둘 다 타임존을 쓰지만 조회는 한 번이어야 한다 —
+      // 기존 두 목록 메서드를 재사용하지 않고 Repository를 직접 부르는 이유의
+      // 하나가 이 중복 제거다.
+      templates.findOnceWithoutCompletedHistory.mockResolvedValue([]);
+      templates.findDailyActiveAt.mockResolvedValue([]);
+
+      await service.listTodosOn(USER_ID, at);
+
+      expect(users.findTimeZone).toHaveBeenCalledTimes(1);
+    });
+
+    it('붙어 온 기록으로 progress를 만들고 없으면 null이다', async () => {
+      templates.findOnceWithoutCompletedHistory.mockResolvedValue([
+        withHistories(
+          createTemplate({
+            todoId: 1n,
+            completeType: 'ONCE',
+            activeFrom: null,
+            shouldDoAt: null,
+          }),
+          [createHistory({ progressValue: new Prisma.Decimal('30') })],
+        ),
+      ]);
+      templates.findDailyActiveAt.mockResolvedValue([daily]);
+
+      const items = await service.listTodosOn(USER_ID, at);
+
+      // 매일 반복(마감 있음)이 앞, 예정일 없는 일회성이 뒤다.
+      expect(items[0]?.progress).toBeNull();
+      expect(items[1]?.progress?.progressValue).toBe(30);
+    });
+
+    it('타임존을 읽을 유저가 없으면 NotFoundException이고 목록을 조회하지 않는다', async () => {
+      users.findTimeZone.mockResolvedValue(null);
+
+      await expect(service.listTodosOn(USER_ID, at)).rejects.toThrow(
+        NotFoundException,
+      );
+      expect(templates.findOnceWithoutCompletedHistory).not.toHaveBeenCalled();
+      expect(templates.findDailyActiveAt).not.toHaveBeenCalled();
+    });
+
+    it('두 목록이 다 비어 있으면 빈 배열이다', async () => {
+      templates.findOnceWithoutCompletedHistory.mockResolvedValue([]);
+      templates.findDailyActiveAt.mockResolvedValue([]);
+
+      await expect(service.listTodosOn(USER_ID, at)).resolves.toEqual([]);
+    });
+  });
+
   describe('getTodo', () => {
     it('없는 할 일이면 NotFoundException이다', async () => {
       // 남의 할 일도 같은 결과다 — `findById`가 소유자를 조건에 넣으므로 `null`로

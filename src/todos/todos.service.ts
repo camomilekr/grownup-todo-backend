@@ -9,7 +9,12 @@ import {
   TodoTemplateDeletedError,
   TodoTemplateNotFoundError,
 } from './todo-errors';
-import { toHistoriedOn, toLocalDateKey } from './todo-local-date';
+import {
+  toHistoriedOn,
+  toLocalDateKey,
+  toNextLocalDayStart,
+} from './todo-local-date';
+import { sortTodosByDeadline } from './todo-list-order';
 // `Prisma`만 값으로 가져온다. `PrismaClientKnownRequestError`를 `instanceof`로 판별해야
 // 하기 때문이다 — 오류 코드 문자열만 보면 그 속성을 가진 아무 객체나 통과한다.
 import { Prisma } from '../generated/prisma/client';
@@ -147,9 +152,10 @@ function omitUndefined<T extends object>(source: T): T {
  * 이 계층의 일이다. 변환 자체는 순수 함수(`todo-view.ts`)가 하고 Service는 **무엇을
  * 조회할지 고르는 판단**을 한다.
  *
- * **조회 3종이 목록 둘과 상세 하나다.** 목록을 반복 방식별로 나눈 것은 조회 조건이 아예
+ * **조회 4종이 목록 셋과 상세 하나다.** 목록을 반복 방식별로 나눈 것은 조회 조건이 아예
  * 다르기 때문이다 — 일회성은 날짜로 거르지 않고 매일 반복은 날짜가 조건의 중심이다.
- * 둘을 하나로 합쳐 내보낼지는 그 형태를 받는 계층이 정하면 된다.
+ * 둘을 마감 순으로 병합한 목록(`listTodosOn`)도 있으므로, 화면이 요구하는 쪽을
+ * 그 형태를 받는 계층이 고르면 된다.
  *
  * **정의를 다루는 쓰기가 만들기·고치기·삭제 셋이다.** 셋의 공통점이 둘 있다. 하나는
  * 입력 규칙을 `assertShape` 한 곳에 모아 만들기와 고치기가 **같은 규칙**을 통과한다는 것,
@@ -208,6 +214,55 @@ export class TodosService {
     );
 
     return rows.map((row) => toTodoListItem(row, row.histories[0]));
+  }
+
+  /**
+   * 두 목록(`listOnce`·`listDailyOn`과 같은 조회 조건)을 병합해 **마감 순간
+   * 오름차순** 한 배열로 돌려준다(사용자 확정 — "완료일이 가까운 순"). 마감은
+   * 일회성이 예정일(`shouldDoAt`), 매일 반복이 유저 타임존에서 다음 달력 날짜가
+   * 시작되는 최초의 순간이고, 예정일 없는 일회성은 마감 없음으로 맨 뒤·만든 순이다
+   * (`sortTodosByDeadline`).
+   *
+   * **기존 두 목록 메서드를 재사용하지 않고 Repository를 직접 부른다.** 이유가
+   * 둘이다. 하나는 정렬이 행 수준에서만 가능하다는 것 — `TodoListItem`에는 2차
+   * 정렬키(`createdAt`)가 없어서 변환 뒤에는 동률의 순서를 정할 수 없다. 다른
+   * 하나는 타임존 조회의 중복 — `listDailyOn`이 안에서 타임존을 읽으므로
+   * 재사용하면 두 번 읽게 되는데, 여기서는 한 번 읽어 날짜 키와 마감 계산에 함께
+   * 쓴다.
+   *
+   * **하나의 `at`에서 세 값이 나온다.** 활성 판정에는 그대로, 붙일 기록을 찾는
+   * 데는 유저 타임존 기준 날짜 키로, 매일 반복의 마감에는 다음 달력 날짜의 시작
+   * 순간으로. 다른 순간에서 만들면 목록·기록·마감이 서로 다른 시점을 말하게 된다.
+   *
+   * **완료 여부는 순서에 반영하지 않는다**(사용자 확정). 완료된 일회성은 쿼리가
+   * 이미 제외하고, 완료된 매일 반복을 뒤로 보내면 완료 토글마다 목록이 재배열되어
+   * 화면이 튄다 — 화면이 `progress.isCompleted`로 구분한다.
+   *
+   * @param at 기준 순간(보통 요청이 도착한 시각)
+   * @throws {NotFoundException} 그 유저가 없거나 탈퇴했을 때
+   */
+  async listTodosOn(userId: bigint, at: Date): Promise<TodoListItem[]> {
+    const timeZone = await this.readTimeZone(userId);
+
+    // 두 조회는 서로를 기다릴 이유가 없다. 순차 `await`는 대기 시간을 더한다.
+    const [onceRows, dailyRows] = await Promise.all([
+      this.templates.findOnceWithoutCompletedHistory(userId),
+      this.templates.findDailyActiveAt(
+        userId,
+        at,
+        toLocalDateKey(at, timeZone),
+      ),
+    ]);
+
+    // 정렬이 변환보다 앞이다 — 2차 정렬키(`createdAt`)가 행에만 있다.
+    const sorted = sortTodosByDeadline(
+      [...onceRows, ...dailyRows],
+      toNextLocalDayStart(at, timeZone),
+    );
+
+    // 붙어 오는 기록은 0개 또는 1개다(근거는 Repository 주석에 있다). 비어 있으면
+    // `undefined`가 넘어가는데 `toTodoListItem`이 그것을 "없음"으로 받는다.
+    return sorted.map((row) => toTodoListItem(row, row.histories[0]));
   }
 
   /**

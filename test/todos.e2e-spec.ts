@@ -1236,6 +1236,80 @@ describe('Todos Repository (e2e)', () => {
     });
   });
 
+  describe('병합 목록 — 마감 순간 오름차순 (listTodosOn)', () => {
+    // 이 파일의 다른 테스트들이 공유 유저(`userId`)에 할 일을 계속 만들어 두므로,
+    // **목록 전체의 순서**를 단정하려면 전용 유저가 필요하다.
+    let mergedUserId: bigint;
+
+    beforeAll(async () => {
+      const user = await prisma.appUser.create({
+        data: { email: uniqueEmail('todos-e2e-merged'), timeZone },
+      });
+      mergedUserId = user.userId;
+    });
+
+    afterAll(async () => {
+      // cascade로 template·history가 함께 지워진다.
+      await prisma.appUser.deleteMany({ where: { userId: mergedUserId } });
+    });
+
+    it('연체 일회성 < 매일 반복 < 미래 일회성 < 예정일 없는 일회성(만든 순)으로 나온다', async () => {
+      // 사용자 요구 문장("완료일이 가까운 순") 그대로의 관찰이다. 기준 순간은
+      // 서울 8월 2일 14:00 — 매일 반복의 마감은 유저 타임존(서울)에서 다음 달력
+      // 날짜(8월 3일)가 시작되는 최초의 순간 = 2026-08-02T15:00:00Z다.
+      const service = app.get(TodosService);
+      const at = new Date('2026-08-02T05:00:00.000Z');
+
+      // **마감 순서와 다르게 만든다** — 만든 순이 그대로 나오면 통과하지 않게
+      // 하려는 것이다. 예정일 없는 둘만 "만든 순" 단정을 위해 순서대로 만든다.
+      const futureOnce = await templates.create({
+        userId: mergedUserId,
+        title: '미래 예정일 일회성',
+        todoType: 'GENERAL',
+        completeType: 'ONCE',
+        // 매일 반복의 마감(2026-08-02T15:00:00Z)보다 뒤다.
+        shouldDoAt: new Date('2026-09-01T09:00:00.000Z'),
+      });
+      const noDueFirst = await templates.create({
+        userId: mergedUserId,
+        title: '예정일 없는 일회성 (먼저 만든 것)',
+        todoType: 'GENERAL',
+        completeType: 'ONCE',
+      });
+      const daily = await templates.create({
+        userId: mergedUserId,
+        title: '활성 매일 반복',
+        todoType: 'GENERAL',
+        completeType: 'DAILY',
+        activeFrom: new Date('2026-07-01T00:00:00.000Z'),
+      });
+      const overdueOnce = await templates.create({
+        userId: mergedUserId,
+        title: '연체된 일회성',
+        todoType: 'GENERAL',
+        completeType: 'ONCE',
+        // 기준 순간보다 한참 앞이다 — 지났어도 완료 전에는 목록에 남는다.
+        shouldDoAt: new Date('2026-07-20T09:00:00.000Z'),
+      });
+      const noDueSecond = await templates.create({
+        userId: mergedUserId,
+        title: '예정일 없는 일회성 (나중에 만든 것)',
+        todoType: 'GENERAL',
+        completeType: 'ONCE',
+      });
+
+      const items = await service.listTodosOn(mergedUserId, at);
+
+      expect(items.map((item) => item.todoId)).toEqual([
+        overdueOnce.todoId,
+        daily.todoId,
+        futureOnce.todoId,
+        noDueFirst.todoId,
+        noDueSecond.todoId,
+      ]);
+    });
+  });
+
   describe('복합 외래키 — 소유자 위조를 DB가 막는다', () => {
     it('남의 todoId에 자기 userId를 붙인 기록은 삽입 자체가 거절된다', async () => {
       // 라운드 1에서 `db execute`로 실측한 것을 테스트로 고정한다. 이 제약이
