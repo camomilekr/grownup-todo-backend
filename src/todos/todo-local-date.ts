@@ -108,6 +108,63 @@ export function toHistoriedOn({
     : toLocalDateKey(performedAt, timeZone);
 }
 
+/**
+ * 유저 타임존에서 `at`의 **다음 달력 날짜가 시작되는 최초의 순간**을 돌려준다.
+ * 매일 반복 할 일의 마감 순간이 이 값이다 — "오늘까지"의 끝이 곧 다음 날짜의 시작이다.
+ *
+ * **계약을 "다음 자정"으로 두지 않았다.** DST(일광 절약 시간) 전환일에는 자정이
+ * 없거나 두 번 있기 때문이다 — `America/Santiago`의 봄 전환은 시계가 00:00을
+ * 건너뛰어 그날이 01:00에 시작하고, `America/Havana`의 가을 전환은 00:00~01:00이
+ * 두 번 온다. "다음 달력 날짜의 최초 순간"은 두 경우를 모두 흡수한다 — 없으면
+ * 그날의 첫 순간(01:00), 두 번이면 이른 쪽이다.
+ *
+ * **구현은 오프셋 역산이 아니라 `toLocalDateKey` 기준의 이진 탐색이다.** 벽시계
+ * 자정에서 순간을 역산하면 위 두 경우와 비정수 오프셋(`Asia/Kathmandu` +05:45)을
+ * 각각 따로 다뤄야 하는데, "로컬 날짜가 다음 날이 되는 최초 순간"을 직접 찾으면
+ * 정의가 곧 구현이라 그 경우들이 저절로 맞는다. 탐색 폭이 48시간(밀리초 단위)이라
+ * 반복이 28회 남짓이고, 요청당 한 번 부르는 자리라 비용 문제가 없다.
+ *
+ * 반환값은 항상 `at`보다 **엄격히 뒤다.** `at`이 자정 정각이어도 다음 날의 시작을
+ * 돌려준다 — 같은 순간을 돌려주면 마감이 "이미 지난" 것으로 읽힌다.
+ *
+ * @param at 기준 순간 (보통 요청이 도착한 시각)
+ * @param timeZone IANA 타임존 이름. `AppUser.timeZone`이 이 값을 들고 있다
+ * @throws {RangeError} `at`이 유효하지 않거나 `timeZone`이 알 수 없는 이름일 때
+ */
+export function toNextLocalDayStart(at: Date, timeZone: string): Date {
+  // 유효성 검사를 겸한다 — Invalid Date와 알 수 없는 타임존은 여기서 던진다.
+  const currentKey = toLocalDateKey(at, timeZone);
+
+  // 다음 달력 날짜의 키. 날짜 키는 UTC 자정 `Date`라 하루치 밀리초를 더하면 된다 —
+  // 이 덧셈은 키 공간(UTC)의 산술이고, 타임존의 하루 길이(23~25시간)와 무관하다.
+  const targetKeyTime = currentKey.getTime() + MILLISECONDS_PER_DAY;
+
+  // 불변식 — `low`의 로컬 날짜는 아직 오늘이고, `high`의 로컬 날짜는 다음 날
+  // 이상이다. `at`+48시간이면 DST로 한 시간이 되돌아가도 로컬 시계가 47시간은
+  // 나아가므로 날짜가 반드시 넘어가 있다.
+  //
+  // 로컬 날짜는 순간에 대해 단조 증가다(가을 전환도 시계를 자정 너머로 되돌리지는
+  // 않는다 — Havana 실측에서 확인). 그래서 "처음으로 다음 날이 되는 순간"을 이진
+  // 탐색으로 찾을 수 있다.
+  let low = at.getTime();
+  let high = at.getTime() + 2 * MILLISECONDS_PER_DAY;
+
+  while (high - low > 1) {
+    const middle = Math.floor((low + high) / 2);
+
+    // 목표 날짜를 건너뛰는 타임존 변경(달력에서 하루가 통째로 사라진 사례가 실제로
+    // 있다)까지 견디도록 등호가 아니라 `>=`로 비교한다 — 그때의 답은 "그다음으로
+    // 시작되는 날짜의 최초 순간"이다.
+    if (toLocalDateKey(new Date(middle), timeZone).getTime() >= targetKeyTime) {
+      high = middle;
+    } else {
+      low = middle;
+    }
+  }
+
+  return new Date(high);
+}
+
 /** `YYYY-MM-DD` 형식만 받는다. 앞뒤 공백도 허용하지 않는다. */
 const DATE_KEY_PATTERN = /^(\d{4})-(\d{2})-(\d{2})$/;
 

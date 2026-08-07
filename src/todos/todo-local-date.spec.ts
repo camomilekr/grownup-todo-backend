@@ -4,6 +4,7 @@ import {
   parseLocalDateKey,
   toHistoriedOn,
   toLocalDateKey,
+  toNextLocalDayStart,
 } from './todo-local-date';
 
 describe('toLocalDateKey', () => {
@@ -226,6 +227,119 @@ describe('toHistoriedOn', () => {
     });
 
     expect(once.toISOString()).not.toBe(daily.toISOString());
+  });
+});
+
+describe('toNextLocalDayStart', () => {
+  // 매일 반복의 "마감 순간"을 만드는 함수다 — 그날이 끝나는 순간, 곧 **다음 달력
+  // 날짜가 시작되는 최초의 순간**을 돌려준다. 계약을 "다음 자정"으로 두지 않은
+  // 이유가 아래 DST(일광 절약 시간) 절에 있다 — 전환일에는 자정이 없거나 두 번 있다.
+  //
+  // DST 전환 날짜·시각은 전부 Node 런타임의 tzdata로 실측해 고정한 상수다(2026-08-07
+  // 실측). tzdata가 미래 규칙을 바꾸면 이 테스트가 깨져서 알려 준다 — 그것이 의도다.
+
+  it('서울에서 다음 날짜의 시작은 다음 KST 자정이다', () => {
+    // 서울 8월 8일 05:00 → 서울 8월 9일 0시 = 2026-08-08T15:00:00Z.
+    expect(
+      toNextLocalDayStart(
+        new Date('2026-08-07T20:00:00.000Z'),
+        'Asia/Seoul',
+      ).toISOString(),
+    ).toBe('2026-08-08T15:00:00.000Z');
+  });
+
+  it('UTC에서는 다음 UTC 자정이다', () => {
+    expect(
+      toNextLocalDayStart(
+        new Date('2026-08-07T20:00:00.000Z'),
+        'UTC',
+      ).toISOString(),
+    ).toBe('2026-08-08T00:00:00.000Z');
+  });
+
+  it('음수 오프셋에서도 유저 타임존의 다음 자정이다', () => {
+    // 뉴욕 8월 6일 22:00(EDT, UTC-4) → 뉴욕 8월 7일 0시 = 2026-08-07T04:00:00Z.
+    expect(
+      toNextLocalDayStart(
+        new Date('2026-08-07T02:00:00.000Z'),
+        'America/New_York',
+      ).toISOString(),
+    ).toBe('2026-08-07T04:00:00.000Z');
+  });
+
+  it('자정 직전이면 바로 다음 밀리초가 답이다', () => {
+    // 서울 8월 7일 23:59:59.999 → 1밀리초 뒤가 8월 8일의 시작이다.
+    expect(
+      toNextLocalDayStart(
+        new Date('2026-08-07T14:59:59.999Z'),
+        'Asia/Seoul',
+      ).toISOString(),
+    ).toBe('2026-08-07T15:00:00.000Z');
+  });
+
+  it('자정 정각이면 그 순간이 아니라 다음 날의 시작이다', () => {
+    // 서울 8월 8일 0시 정각에 물으면 답은 8월 9일 0시다 — 반환값은 항상 `at`보다
+    // 엄격히 뒤다. 같은 순간을 돌려주면 마감이 "이미 지난" 것으로 읽힌다.
+    expect(
+      toNextLocalDayStart(
+        new Date('2026-08-07T15:00:00.000Z'),
+        'Asia/Seoul',
+      ).toISOString(),
+    ).toBe('2026-08-08T15:00:00.000Z');
+  });
+
+  it('봄 전환으로 자정이 없는 날은 그날의 최초 순간(01:00)이다', () => {
+    // America/Santiago 2026년 봄 전환(실측): 2026-09-06T04:00:00Z에 로컬이
+    // 9월 5일 23:59:59(UTC-4)에서 9월 6일 01:00(UTC-3)으로 건너뛴다. 9월 6일에는
+    // 00:00이 존재하지 않으므로 "다음 자정"은 답이 없고, 이 계약("다음 달력 날짜가
+    // 시작되는 최초의 순간")의 답은 로컬 01:00이다.
+    expect(
+      toNextLocalDayStart(
+        new Date('2026-09-06T03:00:00.000Z'), // 로컬 9월 5일 23:00
+        'America/Santiago',
+      ).toISOString(),
+    ).toBe('2026-09-06T04:00:00.000Z');
+  });
+
+  it('가을 전환으로 자정이 두 번 오는 날은 이른 쪽이다', () => {
+    // America/Havana 2026년 가을 전환(실측): 로컬 11월 1일 00:00~01:00이 두 번
+    // 온다 — 이른 쪽 00:00은 2026-11-01T04:00:00Z(UTC-4), 늦은 쪽 00:00은
+    // 2026-11-01T05:00:00Z(UTC-5)다. 그날이 "시작되는 최초의 순간"은 이른 쪽이다 —
+    // 늦은 쪽을 돌려주면 그보다 앞선 한 시간이 어느 날에도 속하지 않게 된다.
+    expect(
+      toNextLocalDayStart(
+        new Date('2026-11-01T03:00:00.000Z'), // 로컬 10월 31일 23:00
+        'America/Havana',
+      ).toISOString(),
+    ).toBe('2026-11-01T04:00:00.000Z');
+  });
+
+  it('비정수 오프셋(+05:45)에서도 그 타임존의 자정이다', () => {
+    // Asia/Kathmandu(실측): 8월 8일의 시작 = 2026-08-07T18:15:00Z. 오프셋을
+    // 시간 단위로 역산하는 구현은 여기서 45분 어긋난다.
+    expect(
+      toNextLocalDayStart(
+        new Date('2026-08-07T10:00:00.000Z'), // 로컬 8월 7일 15:45
+        'Asia/Kathmandu',
+      ).toISOString(),
+    ).toBe('2026-08-07T18:15:00.000Z');
+  });
+
+  it('유효하지 않은 Date면 던진다', () => {
+    // `toLocalDateKey`와 같은 규칙이다 — 조용히 통과시키면 Invalid Date 마감이
+    // 정렬 비교에 들어가 NaN 비교(항상 거짓)로 순서가 조용히 무너진다.
+    expect(() => toNextLocalDayStart(new Date('쓰레기'), 'Asia/Seoul')).toThrow(
+      RangeError,
+    );
+  });
+
+  it('알 수 없는 타임존 이름이면 던진다', () => {
+    expect(() =>
+      toNextLocalDayStart(
+        new Date('2026-08-07T20:00:00.000Z'),
+        'Asia/Seoul_Invalid',
+      ),
+    ).toThrow(RangeError);
   });
 });
 
