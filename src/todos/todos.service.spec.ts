@@ -30,29 +30,12 @@ const USER_ID = 10n;
 const TIME_ZONE = 'Asia/Seoul';
 
 /**
- * 날짜 컬럼(`@db.Date`)에 넘겨서는 안 되는 `Date` 셋이다. Service가 이력 조회 범위를
- * `Date`로 받으므로, **잘못 만든 `Date`를 거르는 것이 이 계층의 일이 됐다.** (활성
- * 기간은 순간 컬럼이 되면서 이 검사의 대상에서 빠졌다 — `shouldDoAt`과 같은 취급이다.)
- *
- * 셋의 성질이 다르다.
- *
- * - `new Date('쓰레기')` — Invalid Date. 그대로 저장하면 저장 시점에야 터진다
- * - `2026-08-01T09:00:00.000Z` — 시각이 섞였다. 시각 컬럼(`Timestamptz`)인 `completedAt`이나
- *   `shouldDoAt`을 실수로 넘기는 경우다
- * - 로컬 타임존 자정 — **이 저장소가 반복해서 밟은 함정이다.** 어댑터가 UTC 컴포넌트로
- *   직렬화하므로 하루 앞으로 저장되는데 **예외가 하나도 나지 않는다**
- *
- * 세 번째 값을 `new Date(2026, 7, 1)`로 쓰지 않는 이유는 그 식의 값이 **실행 환경의
- * 타임존에 따라 달라지기** 때문이다. 이 저장소는 jest에 타임존을 고정하지 않아서, UTC로
- * 설정된 기계에서는 그 식이 진짜 UTC 자정이 되어 거절되지 않는다 — 그러면 테스트가
- * 통과하면서 아무것도 지키지 못한다. 그래서 한국 시간대(UTC+9)에서 그 식이 만들어 내는
- * 값을 직접 적는다.
+ * 이력 조회 범위로 넘겨서는 안 되는 값이다. 범위가 순간이 되면서 임의의 시각이 정상
+ * 입력이 됐고, 남은 거절 대상은 Invalid Date뿐이다 — 이 값은 서버가 유저 타임존
+ * 날짜로 잘라 쓰는데(`toLocalDateKey`), 거르지 않으면 그 변환이 `RangeError`로 터져
+ * 클라이언트 입력 문제가 500으로 나간다.
  */
-const KST_OFFSET_MS = 9 * 60 * 60 * 1000;
 const INVALID_DATE = new Date('쓰레기');
-const NOT_UTC_MIDNIGHT = new Date('2026-08-01T09:00:00.000Z');
-const KST_LOCAL_MIDNIGHT = new Date(Date.UTC(2026, 7, 1) - KST_OFFSET_MS);
-const INVALID_DATE_KEYS = [INVALID_DATE, NOT_UTC_MIDNIGHT, KST_LOCAL_MIDNIGHT];
 
 function createTemplate(overrides: Partial<TodoTemplate> = {}): TodoTemplate {
   return {
@@ -120,9 +103,9 @@ describe('TodosService', () => {
   /**
    * 매일 반복 상세가 받는 기본 범위. 거절을 보는 테스트만 다른 값을 넘긴다.
    *
-   * **`parseLocalDateKey`로 만든다.** 그 함수를 거쳐야 달력 검증(`2026-02-30` 거절)이
-   * 유지되고 UTC 자정이 보장된다 — Service가 `Date`를 받으므로 그 값을 만드는 것은
-   * 부르는 쪽의 책임이고, 여기서는 테스트가 그 자리다.
+   * 범위는 **순간**이라 자정일 필요가 없지만 여기서는 UTC 자정을 쓴다 — 유저 타임존
+   * (서울)에서 같은 날 09:00이라 잘린 날짜 키가 입력 문자열과 같아, 단정에 쓰는 값을
+   * 눈으로 맞춰 볼 수 있다.
    */
   const range = {
     from: parseLocalDateKey('2026-08-01'),
@@ -313,34 +296,83 @@ describe('TodosService', () => {
     });
 
     describe('범위 검증', () => {
-      it.each(INVALID_DATE_KEYS)(
-        '범위 시작일이 %p면 BadRequestException이다',
-        async (from) => {
-          // `assertLocalDateKey`는 `RangeError`를 던진다. 그대로 새게 두면 부르는 쪽이
-          // 잘못 만든 값이 500이 되므로 400으로 바꾼다.
-          templates.findById.mockResolvedValue(
-            createTemplate({ completeType: 'DAILY' }),
-          );
+      it('범위 시작 순간이 Invalid Date면 BadRequestException이다', async () => {
+        // 그대로 내려보내면 유저 타임존으로 자르는 `toLocalDateKey`가 `RangeError`를
+        // 던져 부르는 쪽이 잘못 만든 값이 500이 되므로, 여기서 400으로 거절한다.
+        templates.findById.mockResolvedValue(
+          createTemplate({ completeType: 'DAILY' }),
+        );
 
-          await expect(
-            service.getTodo(USER_ID, 1n, {
-              from,
-              until: parseLocalDateKey('2026-08-31'),
-            }),
-          ).rejects.toThrow(BadRequestException);
-        },
-      );
+        await expect(
+          service.getTodo(USER_ID, 1n, {
+            from: INVALID_DATE,
+            until: parseLocalDateKey('2026-08-31'),
+          }),
+        ).rejects.toThrow(BadRequestException);
+      });
+
+      it('자정 아닌 순간을 허용하고 유저 타임존 날짜로 잘라 넘긴다', async () => {
+        // 범위는 순간이다 — 자정 검증이 없고, 각 순간이 유저 타임존(여기서는 서울)에서
+        // 속한 날짜로 잘려 날짜 키 비교(양 끝 포함)에 넘어간다. UTC 날짜로 자르면
+        // (7월 31일·8월 1일) 이 단정이 깨진다.
+        templates.findById.mockResolvedValue(
+          createTemplate({ completeType: 'DAILY' }),
+        );
+        histories.findByTodoIdBetween.mockResolvedValue([]);
+
+        await service.getTodo(USER_ID, 1n, {
+          // 서울 기준 8월 1일 05:00.
+          from: new Date('2026-07-31T20:00:00.000Z'),
+          // 서울 기준 8월 2일 05:00.
+          until: new Date('2026-08-01T20:00:00.000Z'),
+        });
+
+        expect(histories.findByTodoIdBetween).toHaveBeenCalledWith(
+          USER_ID,
+          1n,
+          parseLocalDateKey('2026-08-01'),
+          parseLocalDateKey('2026-08-02'),
+        );
+      });
+
+      it('같은 순간이라도 타임존이 다르면 다른 날짜로 잘린다', async () => {
+        // 잘리는 날짜의 경계가 유저 설정으로 정해진다는 것을 고정한다.
+        users.findTimeZone.mockResolvedValue('America/New_York');
+        templates.findById.mockResolvedValue(
+          createTemplate({ completeType: 'DAILY' }),
+        );
+        histories.findByTodoIdBetween.mockResolvedValue([]);
+
+        await service.getTodo(USER_ID, 1n, {
+          // 뉴욕 기준 7월 31일 16:00 — 서울이었다면 8월 1일이다.
+          from: new Date('2026-07-31T20:00:00.000Z'),
+          // 뉴욕 기준 8월 1일 16:00.
+          until: new Date('2026-08-01T20:00:00.000Z'),
+        });
+
+        expect(histories.findByTodoIdBetween).toHaveBeenCalledWith(
+          USER_ID,
+          1n,
+          parseLocalDateKey('2026-07-31'),
+          parseLocalDateKey('2026-08-01'),
+        );
+      });
 
       it.each([
-        ['시작일', { from: undefined, until: parseLocalDateKey('2026-08-31') }],
-        ['종료일', { from: parseLocalDateKey('2026-08-01'), until: undefined }],
+        [
+          '시작 순간',
+          { from: undefined, until: parseLocalDateKey('2026-08-31') },
+        ],
+        [
+          '종료 순간',
+          { from: parseLocalDateKey('2026-08-01'), until: undefined },
+        ],
       ] as const)(
         '범위 %s이 없으면 BadRequestException이다',
         async (_label, incomplete) => {
           // `strictNullChecks`가 꺼져 있어 컴파일러가 이 호출을 막지 못한다. 한쪽만
-          // 빠진 범위를 그대로 조회에 내려보내면 그 끝이 날짜 컬럼과의 비교라, 어느
-          // 기간을 물은 것인지 정해지지 않은 채 결과가 돌아온다. **거절되는 것이 이
-          // 메서드의 관찰 가능한 동작이고 그것을 고정한다.**
+          // 빠진 범위를 그대로 내려보내면 타임존 변환에서 `TypeError`가 나 500이
+          // 된다. **거절되는 것이 이 메서드의 관찰 가능한 동작이고 그것을 고정한다.**
           //
           // 아래 `범위 자체가 비어 있어도`와 막는 자리가 다르다 — 그쪽은 값을 읽는
           // 것 자체가 터지는 경우다.
@@ -355,14 +387,14 @@ describe('TodosService', () => {
       );
 
       // 범위의 **양 끝을 각각** 단정한다. 검사가 두 번 일어나므로 한쪽만 보면 다른 쪽에서
-      // 검사를 건너뛰는 변경이 통과한다 — 종료일 검사만 지우는 한 줄 변이를 실제로
+      // 검사를 건너뛰는 변경이 통과한다 — 종료 쪽 검사만 지우는 한 줄 변이를 실제로
       // 주입해 아래 두 테스트가 그것을 잡는 것을 확인했다.
       //
-      // 자리 이름까지 보는 이유는 **응답이 어느 쪽 날짜가 문제인지 알려 주는 것**이 함수를
-      // 둘로 나눈 목적이기 때문이다. `'시작일'`과 `'종료일'`을 뒤바꾸면 응답이 반대로
+      // 자리 이름까지 보는 이유는 **응답이 어느 쪽 순간이 문제인지 알려 주는 것**이 함수를
+      // 둘로 나눈 목적이기 때문이다. `'시작 순간'`과 `'종료 순간'`을 뒤바꾸면 응답이 반대로
       // 알려 주는데, 종류만 단정하면 그 변경도 통과한다. 문구 전체를 단정하지 않는 것은
       // 다듬을 때마다 깨지기 때문이고, 자리 이름은 장식이 아니라 뜻을 담은 값이다.
-      it('시작일이 잘못되면 그 자리를 알려 준다', async () => {
+      it('시작 순간이 잘못되면 그 자리를 알려 준다', async () => {
         templates.findById.mockResolvedValue(
           createTemplate({ completeType: 'DAILY' }),
         );
@@ -375,11 +407,11 @@ describe('TodosService', () => {
           .catch((error: Error) => error);
 
         expect(thrown).toBeInstanceOf(BadRequestException);
-        expect((thrown as Error).message).toContain('시작일');
-        expect((thrown as Error).message).not.toContain('종료일');
+        expect((thrown as Error).message).toContain('시작 순간');
+        expect((thrown as Error).message).not.toContain('종료 순간');
       });
 
-      it('종료일이 잘못되면 그 자리를 알려 준다', async () => {
+      it('종료 순간이 잘못되면 그 자리를 알려 준다', async () => {
         templates.findById.mockResolvedValue(
           createTemplate({ completeType: 'DAILY' }),
         );
@@ -392,8 +424,8 @@ describe('TodosService', () => {
           .catch((error: Error) => error);
 
         expect(thrown).toBeInstanceOf(BadRequestException);
-        expect((thrown as Error).message).toContain('종료일');
-        expect((thrown as Error).message).not.toContain('시작일');
+        expect((thrown as Error).message).toContain('종료 순간');
+        expect((thrown as Error).message).not.toContain('시작 순간');
       });
 
       it('범위 자체가 비어 있어도 BadRequestException이다', async () => {
@@ -408,21 +440,18 @@ describe('TodosService', () => {
       });
 
       it('거절 메시지에 내부 함수 이름을 담지 않는다', async () => {
-        // 원본 오류 메시지를 그대로 이어 붙이면 두 가지가 잘못된다 — 내부 함수 이름
-        // (`assertLocalDateKey:`)이 클라이언트 응답에 나가고, 그 함수가 여러 사유로
-        // 던지므로 어느 사유든 하나로 단정한 문구를 붙이면 앞뒤가 반대인 문장이 된다.
-        //
-        // 문구 전체를 단정하지 않는 이유는 다듬을 때마다 깨지기 때문이다. 대신 원본을
-        // 이어 붙이지 않는다는 것만 함수 이름으로 고정한다. **`parseLocalDateKey`도 함께
-        // 보는 것은** 검사를 그 함수로 되돌리는 변경에서도 이 규칙이 살아 있게 하려는
-        // 것이다.
+        // 원본 오류 메시지나 내부 함수 이름이 클라이언트 응답에 나가면 안 된다.
+        // 문구 전체를 단정하지 않는 이유는 다듬을 때마다 깨지기 때문이다. 대신 검사
+        // 함수 이름으로만 고정한다 — **`assertLocalDateKey`·`parseLocalDateKey`를
+        // 함께 보는 것은** 검사를 옛 자정 검증으로 되돌리는 변경에서도 이 규칙이
+        // 살아 있게 하려는 것이다.
         templates.findById.mockResolvedValue(
           createTemplate({ completeType: 'DAILY' }),
         );
 
         const thrown = await service
           .getTodo(USER_ID, 1n, {
-            from: NOT_UTC_MIDNIGHT,
+            from: INVALID_DATE,
             until: parseLocalDateKey('2026-08-31'),
           })
           .catch((error: Error) => error);
@@ -432,22 +461,24 @@ describe('TodosService', () => {
         expect((thrown as Error).message).not.toContain('parseLocalDateKey');
       });
 
-      it('시작일이 종료일보다 늦으면 BadRequestException이다', async () => {
+      it('시작 순간이 종료 순간보다 늦으면 BadRequestException이다', async () => {
         // 뒤집힌 범위는 항상 빈 결과이고, 그것은 "기록이 없다"와 구별되지 않는다.
+        // 판정은 잘리기 전의 순간 기준이다 — 같은 날짜 안에서 뒤집힌 시각도 걸린다.
         templates.findById.mockResolvedValue(
           createTemplate({ completeType: 'DAILY' }),
         );
 
         await expect(
           service.getTodo(USER_ID, 1n, {
-            from: parseLocalDateKey('2026-08-31'),
-            until: parseLocalDateKey('2026-08-01'),
+            from: new Date('2026-08-01T10:00:00.000Z'),
+            until: new Date('2026-08-01T09:00:00.000Z'),
           }),
         ).rejects.toThrow(BadRequestException);
       });
 
-      it('같은 날짜는 허용한다', async () => {
-        // 양 끝을 포함하므로 하루짜리 범위가 성립한다.
+      it('같은 순간은 허용한다', async () => {
+        // 잘린 날짜의 비교가 양 끝을 포함하므로 하루짜리 범위가 성립한다 — 활성
+        // 기간(반열림이라 같으면 빈 구간)과 다른 자리다.
         templates.findById.mockResolvedValue(
           createTemplate({ completeType: 'DAILY' }),
         );
@@ -585,8 +616,10 @@ describe('TodosService', () => {
         expect(detail.histories?.[0]?.historiedOn).toBe('2026-08-01');
       });
 
-      it('범위 날짜를 UTC 자정 Date로 바꿔 넘긴다', async () => {
-        // 손으로 만든 `Date`는 한국 시간대에서 하루 앞으로 밀려 저장·조회된다.
+      it('범위 순간을 유저 타임존 기준 날짜 키로 잘라 넘긴다', async () => {
+        // Repository의 인자는 날짜 컬럼(`@db.Date`)과 비교되는 UTC 자정 날짜 키다 —
+        // 순간을 그대로 내려보내면 어댑터가 UTC 컴포넌트로 잘라 유저가 보는 날짜와
+        // 어긋난다. UTC 자정 입력은 서울에서 같은 날 09:00이라 같은 날짜 키가 된다.
         templates.findById.mockResolvedValue(dailyTemplate);
         histories.findByTodoIdBetween.mockResolvedValue([]);
 
@@ -597,6 +630,17 @@ describe('TodosService', () => {
           1n,
           parseLocalDateKey('2026-08-01'),
           parseLocalDateKey('2026-08-31'),
+        );
+      });
+
+      it('타임존을 읽을 유저가 없으면 NotFoundException이다', async () => {
+        // 범위를 자를 타임존이 필요한 갈래다. 없는 유저와 탈퇴한 유저를 구분하지
+        // 않는 것은 `listDailyOn`과 같다.
+        templates.findById.mockResolvedValue(dailyTemplate);
+        users.findTimeZone.mockResolvedValue(null);
+
+        await expect(service.getTodo(USER_ID, 1n, range)).rejects.toThrow(
+          NotFoundException,
         );
       });
 
@@ -762,7 +806,7 @@ describe('TodosService', () => {
       ).rejects.toThrow(BadRequestException);
     });
 
-    it('활성 시작일이 종료일보다 늦으면 거절한다', async () => {
+    it('활성 시작 순간이 상한 순간보다 늦으면 거절한다', async () => {
       await expect(
         service.createTodo(
           USER_ID,
@@ -770,6 +814,20 @@ describe('TodosService', () => {
             activeFrom: parseLocalDateKey('2026-12-31'),
             activeUntil: parseLocalDateKey('2026-08-01'),
           }),
+        ),
+      ).rejects.toThrow(BadRequestException);
+    });
+
+    it('활성 시작 순간과 상한 순간이 같으면 거절한다 (빈 구간)', async () => {
+      // 반열림 구간(`activeFrom <= 순간 < activeUntil`)에서 두 값이 같으면 어느
+      // 순간에도 활성이 아니다 — 뒤집힌 기간과 같은 "만들었는데 보이지 않는" 상태라
+      // 같은 이유로 거절한다.
+      const boundary = new Date('2026-08-01T10:00:00.000Z');
+
+      await expect(
+        service.createTodo(
+          USER_ID,
+          validInput({ activeFrom: boundary, activeUntil: boundary }),
         ),
       ).rejects.toThrow(BadRequestException);
     });

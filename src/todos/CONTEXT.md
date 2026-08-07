@@ -1,6 +1,6 @@
 # CONTEXT
 
-> 마지막 업데이트: 2026-08-05
+> 마지막 업데이트: 2026-08-07
 
 ## 역할
 
@@ -46,6 +46,8 @@
 **매일 반복(DAILY)은 어제 것이 오늘로 밀려오지 않는다.** 어제 하지 않았으면 어제는 미완료로 남고 오늘은 오늘대로 다시 나온다. → `findDailyActiveAt(userId, at, historiedOn)`. 조건은 "요청 순간에 활성인가"뿐이고 기록이 있는지는 조건이 아니다.
 
 **활성 판정은 요청 순간과 활성 기간을 그대로 비교하는 반열림 구간이다** — `activeFrom <= at < activeUntil`(사용자 최종 확정). 시작 순간은 포함되고 상한 순간은 포함되지 않으며, 비어 있으면 그쪽 제한이 없다는 뜻이다. 활성 기간이 순간 컬럼(`Timestamptz(3)`)이 되면서 서버는 그 값에 날짜 의미를 부여하지 않는다 — 시간 해석은 클라이언트의 몫이고, "그날 활성"이 아니라 "그 순간 활성"이다. 상한이 미포함인 이유는 순간에 "그날의 끝"이 없기 때문이다 — 포함으로 두면 상한을 `23:59:59.999…` 같은 정밀도에 얽힌 값으로 표현해야 하고, 미포함이면 다음 자정 하나로 끝난다.
+
+반열림의 귀결로 **두 값이 같은 활성 기간은 빈 구간이다** — 만족하는 순간이 없어 목록에 영영 나오지 않는다. 그래서 `assertShape`가 뒤집힌 경우만이 아니라 같은 경우까지 `BadRequestException`으로 거절한다(`>=` 비교).
 
 **순간과 날짜 키를 따로 받는 것이 이 메서드 시그니처의 요점이다.** 활성 판정은 순간 컬럼과의 비교라 `at`을 그대로 쓰고, 붙여 줄 그날 기록은 날짜 컬럼(`@db.Date`)이 열쇠라 유저 타임존 기준 날짜 키(`historiedOn`)가 필요하다. 하나로 받아 Repository가 변환하면 타임존 판단이 계층을 넘는다 — 같은 요청 순간에서 두 값을 만드는 것은 `listDailyOn`의 일이다.
 
@@ -147,29 +149,24 @@
 | 함수 | 언제 쓰는가 | 대상 |
 |---|---|---|
 | `toHistoriedOn({ completeType, createdAt, performedAt, timeZone })` | **완료 기록 날짜를 만드는 유일한 통로** | `todo_history.historied_on` |
-| `toLocalDateKey(instant, tz)` | 조회에 넘길 "오늘"을 계산할 때 | `findDailyActiveAt`의 `historiedOn` 인자 |
-| `parseLocalDateKey('2026-08-01')` | 사용자가 **고른 날짜**를 받을 때 | 이력 조회 범위(`TodoHistoryRange`) |
-| `assertLocalDateKey(dateKey)` | **받은 `Date`가 날짜 컬럼에 넣어도 되는 값인지** 볼 때 | Service의 이력 조회 범위 |
+| `toLocalDateKey(instant, tz)` | 순간이 유저에게 **며칠인지** 계산할 때 | `findDailyActiveAt`의 `historiedOn` 인자, `getTodo`가 이력 범위 순간을 자를 때 |
+| `parseLocalDateKey('2026-08-01')` | 사용자가 **고른 날짜 문자열**에서 날짜 키를 만들 때 | 지금 프로덕션 경로에는 없다 — 테스트가 날짜 키 픽스처를 만들 때 쓰고, 날짜 문자열을 받는 경계(Controller·DTO)가 생기면 그쪽의 통로다 |
+| `assertLocalDateKey(dateKey)` | **받은 `Date`가 날짜 컬럼에 넣어도 되는 값인지** 볼 때 | `formatLocalDateKey`의 내부 검사 (Service는 더 이상 직접 부르지 않는다) |
 | `formatLocalDateKey(dateKey)` | 날짜 컬럼에서 읽은 값을 **밖으로 내보낼 때** | 응답의 `historiedOn` |
 
 활성 기간(`active_from`·`active_until`)은 이 표에서 빠졌다. 순간 컬럼(`Timestamptz`)이 되면서 `shouldDoAt`과 같은 취급이 됐다 — 자정 검증 없이 순간 그대로 저장하고, 응답에도 `Date` 그대로 내보낸다. 시간 해석은 클라이언트의 몫이다(사용자 확정).
 
-### Service는 날짜를 `Date`로 받고, 그 값을 만드는 것은 부르는 쪽이다
+### 이력 조회 범위는 순간으로 받고 서버가 유저 타임존 날짜로 자른다
 
-`TodoHistoryRange`의 범위 두 자리가 `Date`다. **이 값을 만드는 것은 부르는 쪽의 책임이고, 값을 받는 경계 계층(Controller)이 이 저장소에 아직 없다** — 그래서 지금 그 책임은 `TodosService`를 부르는 코드 전부에 있다. (활성 기간도 `Date`로 받지만 순간이라 이 규칙의 대상이 아니다.)
+`TodoHistoryRange`의 두 자리는 **순간**이다 — 자정일 필요가 없고, `getTodo`의 매일 반복 갈래가 유저 타임존을 읽어(`readTimeZone`) 각 순간이 **유저 타임존에서 속한 날짜**로 자른 뒤(`toLocalDateKey`) 날짜 키 비교에 넘긴다. 활성 기간과 달리 "시간 해석은 클라이언트의 몫"이 아니다 — 비교 대상(`historied_on`)이 날짜 컬럼이라 **변환이 서버 책임이다.** 일회성 갈래는 범위를 쓰지 않으므로 타임존을 읽지 않는다.
 
-**사용자가 고른 날짜 문자열에서 만든다면 반드시 `parseLocalDateKey`를 거쳐야 한다.** 잃는 것과 지키는 것이 다르기 때문이다.
+잘린 날짜의 비교는 **양 끝 포함**을 유지한다. 반열림은 순간 컬럼에만 적용한다 — 날짜 알갱이에서 `until`이 속한 날을 빼면 "지금까지" 조회에서 오늘 기록이 빠지고, 날짜에는 "그날의 끝"이 없다는 반열림의 근거도 적용되지 않는다. 같은 이유로 `assertRange`가 **같은 두 순간을 허용한다**(하루짜리 범위) — 활성 기간(`assertShape`, 같으면 빈 구간 거절)과 판정이 다른 것이 의도다.
 
-- **UTC 자정인지는 Service가 확인한다.** 범위의 두 자리 각각에서 `assertLocalDateKey`를 걸어 `BadRequestException`으로 거절한다. 한국 시간대에서 `new Date(2026, 7, 1)`을 넘기는 실수가 여기서 걸린다
-- **달력 검증(`2026-02-30` 거절)은 Service가 할 수 없다.** `Date.UTC(2026, 1, 30)`이 조용히 3월 2일이 되는데, `Date`가 된 뒤에는 원래 문자열을 알 수 없어 볼 방법이 없다. 3월 2일 UTC 자정은 완전히 정상인 값이라 검사를 통과한다. **이 검증은 `parseLocalDateKey`를 거치는 경우에만 유지된다**
+**남은 검증은 유효성뿐이다.** 값이 없거나 유효하지 않은 `Date`면 `BadRequestException`으로 거절한다(`assertInstant`) — 그대로 내려보내면 `toLocalDateKey`가 `RangeError`를 던져 클라이언트 입력 문제가 500으로 나간다. 뒤집힘 검사는 잘리기 전의 **순간 기준**(`from > until`)이라 같은 날짜 안에서 뒤집힌 시각도 걸리고, 거절 메시지의 값 표현은 `toISOString`이다(검사를 통과한 값이라 던질 수 없고, 실행 환경의 타임존과 로케일에 흔들리지 않는다).
 
-거절 메시지에는 **자리 이름만** 담고 값도 내부 함수 이름도 담지 않는다. `Date`를 문자열에 넣으면 실행 환경의 타임존과 로케일에 따라 다른 문장이 나가고(`Sat Aug 01 2026 …`), 검사 함수가 세 가지 사유로 던지므로 하나로 단정한 문구는 나머지에서 앞뒤가 반대인 문장이 된다.
+거절 메시지에는 **자리 이름만** 담고 원본 값을 담지 않는다. 유효하지 않은 `Date`는 안전한 문자열 표현이 없기 때문이다.
 
-### `assertLocalDateKey`가 값이 없는 경우도 거절한다
-
-`tsconfig.json`이 `strictNullChecks: false`라 `undefined`를 넘기는 호출을 컴파일러가 막지 못한다. 그대로 두면 `undefined.getTime()`이 `TypeError`가 되는데, 그 문구(`Cannot read properties of undefined (reading 'getTime')`)는 무엇을 잘못 넘겼는지 말해 주지 않는다. **어긋난 입력을 오류 종류 하나로 모으는 것**이 이 분기의 값어치다.
-
-**`TodosService`가 맨 앞에서 확인하는 `range == null`은 이유가 다르다.** 그쪽은 `range.from`을 읽는 것이 검사 함수를 부르는 **인자 평가 단계**라 `try` 밖에서 터지고, 그래서 400으로 바꾸는 처리가 통째로 건너뛰어져 실제로 500으로 나간다. 반면 검사 함수 안에서 나는 오류는 종류를 가리지 않고 `BadRequestException`으로 바뀐다.
+**`TodosService`가 맨 앞에서 확인하는 `range == null`은 이유가 다르다.** 그쪽은 `range.from`을 읽는 자리가 검사보다 앞이라, 검사가 없으면 `TypeError`가 나 400으로 바꾸는 처리가 통째로 건너뛰어져 실제로 500으로 나간다.
 
 ### 날짜를 문자열로 내보내는 이유
 

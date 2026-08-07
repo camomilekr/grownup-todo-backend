@@ -220,7 +220,8 @@ export class TodoHistoriesRepository {
    * **부르는 코드가 생겨서 확인했고 넣지 않는 것으로 정했다** — `TodosService.getTodo`가
    * 정의를 매일 반복으로 좁힌 뒤에만 부르므로 위 근거가 타입으로 보장된다.
    *
-   * @param from 범위 시작일(포함). `parseLocalDateKey`로 만든다
+   * @param from 범위 시작일(포함). 유저 타임존 기준 날짜 키(UTC 자정 `Date`)이고,
+   *   부르는 쪽(`TodosService.getTodo`)이 범위 순간을 `toLocalDateKey`로 잘라 만든다
    * @param until 범위 종료일(포함)
    */
   async findByTodoIdBetween(

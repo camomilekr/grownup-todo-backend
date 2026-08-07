@@ -9,12 +9,7 @@ import {
   TodoTemplateDeletedError,
   TodoTemplateNotFoundError,
 } from './todo-errors';
-import {
-  assertLocalDateKey,
-  formatLocalDateKey,
-  toHistoriedOn,
-  toLocalDateKey,
-} from './todo-local-date';
+import { toHistoriedOn, toLocalDateKey } from './todo-local-date';
 // `Prisma`만 값으로 가져온다. `PrismaClientKnownRequestError`를 `instanceof`로 판별해야
 // 하기 때문이다 — 오류 코드 문자열만 보면 그 속성을 가진 아무 객체나 통과한다.
 import { Prisma } from '../generated/prisma/client';
@@ -34,22 +29,21 @@ import {
 import type { TodoDetail, TodoListItem, TodoProgress } from './todo-view';
 
 /**
- * 상세 조회가 이력을 가져올 기간. **양 끝 날짜를 포함한다.**
+ * 상세 조회가 이력을 가져올 기간. **두 값은 순간이다** — 자정일 필요가 없고, 보통
+ * 클라이언트가 고른 시점이 그대로 들어온다.
  *
- * **두 값은 UTC 자정을 가리키는 `Date`여야 한다.** 날짜 컬럼(`@db.Date`)과 비교되는
- * 값인데, 어댑터가 그 컬럼용 값을 UTC 컴포넌트로 직렬화하기 때문이다. 어긋난 값은
- * `getTodo`가 `BadRequestException`으로 거절한다.
+ * **각 순간이 유저 타임존에서 속한 날짜로 잘려 비교된다.** 이력의 키(`historied_on`)가
+ * 날짜 컬럼(`@db.Date`)이라 순간과 그대로 비교할 수 없기 때문이고, 그 변환은
+ * `getTodo`의 매일 반복 갈래가 유저 타임존을 읽어서 한다 — 활성 기간처럼 "시간 해석은
+ * 클라이언트의 몫"이 아니라 **서버가 변환하는 자리다.**
  *
- * **그 `Date`를 만드는 것은 부르는 쪽의 책임이다.** 사용자가 고른 날짜 문자열에서
- * 만든다면 **반드시 `parseLocalDateKey`를 거쳐라**(`todo-local-date.ts`). 이유가 둘이다.
+ * 잘린 날짜의 비교는 **양 끝 포함**이다. 반열림은 순간 컬럼에만 적용한다 —
+ * `historied_on`은 날짜 알갱이라 `until`이 속한 날을 빼면 "지금까지" 조회에서 오늘
+ * 기록이 빠진다. 날짜에는 "그날의 끝"이 필요 없어 반열림의 근거도 적용되지 않는다.
  *
- * - `new Date(2026, 7, 1)`은 **로컬 타임존** 자정이라 한국 시간대에서 하루 앞의 날짜와
- *   비교된다. `parseLocalDateKey`는 `Date.UTC`로만 값을 만들어 그 실수가 불가능하다
- * - **달력 검증이 그 함수에만 있다.** `2026-02-30`은 `Date.UTC`가 조용히 3월 2일로
- *   바꾸는데, `Date`가 된 뒤에는 원래 문자열을 알 수 없어 이 계층이 그것을 볼 방법이 없다
- *
- * 값을 받는 경계 계층(Controller)이 이 저장소에 아직 없다. 그래서 지금 그 책임은
- * `TodosService`를 부르는 코드 전부에 있다.
+ * 값이 없거나 유효하지 않은 `Date`면 `getTodo`가 `BadRequestException`으로 거절한다 —
+ * 그대로 내려보내면 타임존 변환(`toLocalDateKey`)이 `RangeError`를 던져 클라이언트
+ * 입력 문제가 500으로 나간다.
  */
 export type TodoHistoryRange = {
   from: Date;
@@ -227,8 +221,12 @@ export class TodosService {
    * **범위는 반복 방식과 무관하게 먼저 검증한다.** 일회성 갈래는 그 값을 쓰지 않지만,
    * 같은 요청이 반복 방식에 따라 다르게 거절되면 부르는 쪽이 결과를 예측할 수 없다.
    *
-   * @throws {NotFoundException} 그런 할 일이 없거나 남의 것일 때
-   * @throws {BadRequestException} 범위 날짜가 UTC 자정이 아니거나 시작일이 종료일보다 늦을 때
+   * @param range 이력을 가져올 기간. **순간으로 받고** 매일 반복 갈래가 유저 타임존
+   *   기준 날짜로 잘라 쓴다(`TodoHistoryRange`)
+   * @throws {NotFoundException} 그런 할 일이 없거나 남의 것일 때, 매일 반복인데
+   *   타임존을 읽을 유저가 없을 때
+   * @throws {BadRequestException} 범위 순간이 유효하지 않거나 시작 순간이 종료
+   *   순간보다 늦을 때
    */
   async getTodo(
     userId: bigint,
@@ -274,9 +272,19 @@ export class TodosService {
       );
     }
 
+    // 범위 순간을 유저 타임존에서 속한 날짜로 자른다. 이력의 키가 날짜 컬럼이라
+    // 순간과 그대로 비교할 수 없고, 유저마다 하루가 바뀌는 자리가 달라 타임존이
+    // 필요하다 — 일회성 갈래는 범위를 쓰지 않으므로 타임존을 읽지 않는다.
+    const timeZone = await this.readTimeZone(userId);
+
     return toDailyTodoDetail(
       narrowed,
-      await this.histories.findByTodoIdBetween(userId, todoId, from, until),
+      await this.histories.findByTodoIdBetween(
+        userId,
+        todoId,
+        toLocalDateKey(from, timeZone),
+        toLocalDateKey(until, timeZone),
+      ),
     );
   }
 
@@ -680,16 +688,23 @@ export class TodosService {
       throw new BadRequestException('매일 반복 할 일에는 예정일을 둘 수 없다');
     }
 
-    // 뒤집힌 활성 기간은 어느 순간에도 활성이 아니라 목록에 영영 나오지 않는다. 오류가
-    // 나지 않고 "만들었는데 보이지 않는" 상태가 되는 쪽이라 여기서 막는다. Invalid
-    // Date는 이 비교(NaN 비교는 항상 거짓)를 통과한다 — 활성 기간의 형식 검증을 하지
-    // 않는 것과 같은 판단이다(시간 해석은 클라이언트의 몫, 사용자 확정).
+    // 뒤집히거나 빈 활성 기간은 어느 순간에도 활성이 아니라 목록에 영영 나오지 않는다.
+    // 오류가 나지 않고 "만들었는데 보이지 않는" 상태가 되는 쪽이라 여기서 막는다.
+    // 두 값이 같은 경우까지 막는 것은 판정이 반열림 구간이기 때문이다 —
+    // `activeFrom <= 순간 < activeUntil`에서 두 값이 같으면 만족하는 순간이 없다.
+    // Invalid Date는 이 비교(NaN 비교는 항상 거짓)를 통과한다 — 활성 기간의 형식
+    // 검증을 하지 않는 것과 같은 판단이다(시간 해석은 클라이언트의 몫, 사용자 확정).
     if (
       shape.activeFrom != null &&
       shape.activeUntil != null &&
-      shape.activeFrom.getTime() > shape.activeUntil.getTime()
+      shape.activeFrom.getTime() >= shape.activeUntil.getTime()
     ) {
-      throw new BadRequestException('활성 기간의 시작일이 종료일보다 늦다');
+      // 메시지도 순간 용어를 쓴다. "시작일이 종료일보다 늦다"로 두면 같은 날짜 안에서
+      // 뒤집힌 순간(시작 10:00Z, 상한 09:00Z)을 보낸 사용자가 무엇을 고쳐야 하는지
+      // 알 수 없다.
+      throw new BadRequestException(
+        '활성 기간이 비어 있다 — 시작 순간이 상한 순간보다 앞서야 한다',
+      );
     }
   }
 
@@ -765,10 +780,18 @@ export class TodosService {
   }
 
   /**
-   * 이력 조회 범위가 날짜 컬럼(`@db.Date`)과 비교해도 되는 값인지 본다.
+   * 이력 조회 범위가 타임존 변환에 넣어도 되는 순간들인지 본다.
+   *
+   * 자정인지는 더 보지 않는다 — 범위가 순간이 되면서 임의의 시각이 정상 입력이다.
+   * 유효성만 남는 이유는 활성 기간과 다르다. 그쪽은 저장만 하고 해석을 클라이언트에
+   * 맡기지만, **이 값은 서버가 유저 타임존 날짜로 잘라 쓴다** — 유효하지 않은 값을
+   * 그대로 내려보내면 `toLocalDateKey`가 `RangeError`를 던져 클라이언트 입력 문제가
+   * 500으로 나간다.
    *
    * **뒤집힌 범위도 거절한다.** 그대로 조회하면 항상 빈 배열이 돌아오고, 그것은 "그 기간에
    * 기록이 없다"와 구별되지 않는다 — 아무 오류 없이 잘못된 화면이 그려지는 쪽이다.
+   * 두 순간이 같은 것은 허용한다 — 잘린 날짜의 비교가 양 끝 포함이라 하루짜리 범위가
+   * 성립하고, 활성 기간(반열림이라 같으면 빈 구간)과 다른 자리다.
    */
   private assertRange(range: TodoHistoryRange): void {
     // 범위 자체가 비어 있는 경우를 먼저 막는다. `strictNullChecks`가 꺼져 있어 컴파일러가
@@ -778,48 +801,39 @@ export class TodosService {
       throw new BadRequestException('기간 범위가 없다');
     }
 
-    this.assertDateKey('기간 범위의 시작일', range.from);
-    this.assertDateKey('기간 범위의 종료일', range.until);
+    this.assertInstant('기간 범위의 시작 순간', range.from);
+    this.assertInstant('기간 범위의 종료 순간', range.until);
 
-    // 위 검사를 통과한 값만 여기 온다. 그래서 `formatLocalDateKey`가 던질 수 없고, 메시지에
-    // 실리는 표현도 실행 환경의 타임존에 흔들리지 않는다 — `Date`를 그대로 문자열에 넣으면
+    // 뒤집힘은 잘리기 전의 순간 기준으로 본다 — 유저 타임존을 읽기 전에 판정할 수
+    // 있고, 순간이 뒤집혔는데 잘린 날짜가 뒤집히지 않는 조합은 없다(자르기는 단조롭다).
+    // 위 검사를 통과한 값만 여기 오므로 `toISOString`이 던질 수 없고, 그 표현은
+    // 실행 환경의 타임존과 로케일에 흔들리지 않는다 — `Date`를 그대로 문자열에 넣으면
     // `Sat Aug 01 2026 …`처럼 기계마다 다른 문장이 나간다.
     if (range.from.getTime() > range.until.getTime()) {
       throw new BadRequestException(
-        `기간 범위의 시작일이 종료일보다 늦다 ` +
-          `(from=${formatLocalDateKey(range.from)}, until=${formatLocalDateKey(range.until)})`,
+        `기간 범위의 시작 순간이 종료 순간보다 늦다 ` +
+          `(from=${range.from.toISOString()}, until=${range.until.toISOString()})`,
       );
     }
   }
 
   /**
-   * 날짜 하나가 날짜 컬럼(`@db.Date`)에 넣어도 되는 값인지 보고, 실패를
-   * `BadRequestException`으로 바꾼다.
+   * 순간 하나가 값이 있고 유효한 `Date`인지 보고, 실패를 `BadRequestException`으로
+   * 바꾼다.
    *
-   * `assertLocalDateKey`가 던지는 `RangeError`를 그대로 새게 두면 부르는 쪽이 잘못 만든
-   * 값이 500으로 나가 서버 장애처럼 보인다.
+   * `strictNullChecks`가 꺼져 있어 값이 빠진 호출을 컴파일러가 막지 못하고, Invalid
+   * Date는 비교 연산(NaN 비교는 항상 거짓)을 조용히 통과한다 — 여기서 막지 않으면
+   * 뒤에 오는 타임존 변환이 `RangeError`로 터져 500이 된다.
    *
-   * **원본 메시지를 응답에 이어 붙이지 않는다.** 그 함수는 값이 없는 경우·유효하지 않은
-   * `Date`·UTC 자정이 아닌 경우를 모두 던지므로 하나로 단정한 문구를 붙이면 나머지에서
-   * 앞뒤가 반대인 문장이 되고, 이어 붙이면 내부 함수 이름이 응답에 나간다. 원인 상세는
-   * 로그로 보내고 응답에는 **어느 값이 문제인지**만 담는다.
-   *
-   * **날짜 한 쪽씩 나눠 부르는 이유가 둘이다.** 어느 값이 문제인지 응답에 담을 수 있고,
-   * `catch`가 검사 대상을 **다시 읽지 않는다** — 인자로 이미 받은 값을 쓰므로 오류를
-   * 다루는 자리가 스스로 던질 여지가 없다.
+   * **순간 한 쪽씩 나눠 부르는 이유는 어느 값이 문제인지 응답에 담기 위해서다.**
    *
    * @param label 응답에 실을 자리 이름. 어느 값이 어긋났는지 알려 준다. 그대로 문장의
-   *   주어가 되므로 `'기간 범위의 시작일'`처럼 완결된 이름을 넘긴다
+   *   주어가 되므로 `'기간 범위의 시작 순간'`처럼 완결된 이름을 넘긴다
    */
-  private assertDateKey(label: string, value: Date): void {
-    try {
-      assertLocalDateKey(value);
-    } catch (error) {
-      // 원인을 삼키지 않는다. 어떻게 어긋났는지가 이 메시지에 있고 그것을 응답이 아니라
-      // 로그에 남긴다 — 부르는 쪽의 입력 오류이므로 `error`가 아니라 `warn`이다.
-      this.logger.warn(
-        `${label}을 해석할 수 없다: ${(error as Error).message}`,
-      );
+  private assertInstant(label: string, value: Date): void {
+    if (value == null || Number.isNaN(value.getTime())) {
+      // 부르는 쪽의 입력 오류이므로 `error`가 아니라 `warn`이다.
+      this.logger.warn(`${label}이 없거나 유효하지 않은 Date다`);
 
       // **값을 응답에 싣지 않는다.** `Date`를 문자열에 넣으면 실행 환경의 타임존과 로케일에
       // 따라 다른 문장이 나가고, 여기 오는 값은 유효하지 않은 `Date`일 수도 있어 UTC 표현

@@ -8,6 +8,7 @@ import {
   TodoTemplateNotFoundError,
 } from './../src/todos/todo-errors';
 import { TodoTemplatesRepository } from './../src/todos/todo-templates.repository';
+import { TodosService } from './../src/todos/todos.service';
 import {
   parseLocalDateKey,
   toHistoriedOn,
@@ -1099,7 +1100,9 @@ describe('Todos Repository (e2e)', () => {
 
     it('양 끝 날짜를 포함하고 범위 밖은 빼낸다', async () => {
       // `gte`/`lte`를 `gt`/`lt`로 바꾸는 수정이 통과하지 않게 경계를 고정한다.
-      // 활성 기간과 같은 규칙이다 — 사용자가 고른 날짜는 양쪽을 포함한다.
+      // 사용자가 고른 날짜는 양쪽을 포함한다. (활성 기간은 순간 컬럼이 되면서
+      // 반열림으로 갔지만, 이쪽은 날짜 알갱이 그대로라 그 이유가 적용되지 않는다 —
+      // 날짜에는 "그날의 끝"이 필요 없다.)
       const template = await createRangeTemplate(userId, '범위 경계');
       await record(template, '2026-10-04', '10');
       await record(template, '2026-10-05', '20');
@@ -1191,6 +1194,45 @@ describe('Todos Repository (e2e)', () => {
           parseLocalDateKey('2027-03-31'),
         ),
       ).toEqual([]);
+    });
+  });
+
+  describe('상세 조회의 이력 범위 — 순간을 유저 타임존 날짜로 자른다', () => {
+    it('자정 아닌 범위 순간이 유저 타임존에서 속한 날짜의 기록을 포함한다', async () => {
+      // 이력 범위는 순간으로 받고, Service가 유저 타임존(여기서는 서울)을 읽어
+      // 그 순간이 속한 날짜로 자른 뒤 날짜 키 비교(양 끝 포함)에 넘긴다.
+      // `2026-08-01T20:00:00Z`는 서울에서 8월 2일 05:00이므로 8월 2일 기록까지
+      // 포함되어야 한다 — 순간을 UTC 날짜로 자르면(8월 1일) 이 기록이 빠진다.
+      const service = app.get(TodosService);
+      const template = await templates.create({
+        userId,
+        title: '이력 범위 순간화',
+        todoType: 'NUMERIC',
+        completeType: 'DAILY',
+        targetValue: '100',
+        targetUnit: '회',
+      });
+      await histories.upsertForHistoriedOn(
+        {
+          todoId: template.todoId,
+          userId: template.userId,
+          historiedOn: parseLocalDateKey('2026-08-02'),
+          targetValue: '100',
+          targetUnit: '회',
+        },
+        { progressValue: '10' },
+      );
+
+      const detail = await service.getTodo(userId, template.todoId, {
+        // 서울 기준 8월 1일 05:00 — 유저 타임존 날짜로 8월 1일이다.
+        from: new Date('2026-07-31T20:00:00.000Z'),
+        // 서울 기준 8월 2일 05:00 — 유저 타임존 날짜로 8월 2일이다.
+        until: new Date('2026-08-01T20:00:00.000Z'),
+      });
+
+      expect(detail.completeType).toBe('DAILY');
+      const items = detail.completeType === 'DAILY' ? detail.histories : [];
+      expect(items.map((item) => item.historiedOn)).toContain('2026-08-02');
     });
   });
 
