@@ -1,45 +1,14 @@
-# 참조 — 증상과 원인
+# 참조 — 증상과 원인 (이 저장소 고유)
 
-명령이 실패했거나 증상의 원인을 모를 때 읽는다. 테스트 쪽은 `.claude/ref/testing-traps.md`.
+**일반적인 git·워크트리·훅 증상(브랜치 already checked out, ref 슬래시 충돌, `rm -rf node_modules`의 ENOTEMPTY, embedded git repository, ruleset bypass 경고, `git stash -k -u`와 `git add -N` 충돌)은 git-workflow 플러그인의 `ref/troubleshooting.md`에 있다.** 여기는 이 저장소의 스크립트·도구 설정에서만 걸리는 것을 모았다. 테스트 쪽은 `.claude/ref/testing-traps.md`.
 
-## git · 워크트리
+## 워크트리 스크립트
 
 | 증상 | 원인 |
 |---|---|
-| `fatal: '<브랜치>' is already checked out` | 다른 워크트리가 그 브랜치를 쓰고 있다. `git worktree list`로 찾는다 |
-| `fatal: cannot lock ref 'refs/heads/feature/x/y'` | 트랙 브랜치에 슬래시를 썼다. 하이픈으로 잇는다(아래) |
-| `git branch -d`가 거부 | 워크트리가 아직 그 브랜치를 붙잡고 있거나, 정말 병합되지 않았다 |
 | 워크트리에서 `npm test`가 모듈을 못 찾음 | 그 워크트리에 `node_modules`가 없다. `worktree-new.sh`를 썼다면 복제가 실패한 것이다 |
-| `cp -Rc`가 실패한다 | APFS가 아니다. `npm install`로 돌아간다 |
-| 워크트리 디렉터리를 손으로 지웠다 | `git worktree prune`으로 남은 등록 정보를 정리한다 |
-| `git worktree remove`가 느리거나 거부한다 | `node_modules`를 먼저 지우지 않았다. `worktree-drop.sh`가 순서를 지킨다 |
-| `rm -rf .../node_modules`가 `Directory not empty` | 정상이다. 아래 참고 |
-| 커밋 하나에 여러 관심사가 들어갔다 | `git add -A`를 썼다. 경로를 지정해 의미 단위로 나눈다 |
-| `git stash -k -u`가 `Entry '...' not uptodate. Cannot merge.` | `fingerprint.sh`가 남긴 `git add -N` 표식이 있는 파일을 그 뒤에 편집했다. `git reset`으로 인덱스를 비운 뒤 다시 스테이징한다 |
-| 푸시·브랜치 삭제에 `Repository rule violations` 경고가 뜨는데 결과는 성공 | ruleset의 `bypass_actors`에 admin이 있으면 위반을 보고하고 허용한다. **실패와 구분하는 기준은 `[deleted]`·`[new branch]` 줄이 있는지다** |
-
-### 트랙 브랜치에 슬래시를 쓸 수 없다
-
-`feature/step-goal-presets`가 있는데 `feature/step-goal-presets/store`를 만들 수 없다. **git ref는 파일시스템 기반이라 같은 이름이 파일이면서 디렉터리일 수 없다.**
-
-```
-fatal: cannot lock ref 'refs/heads/feature/foo/bar': 'refs/heads/feature/foo' exists;
-cannot create 'refs/heads/feature/foo/bar'
-```
-
-반대 순서도 막힌다 — `feature/foo/bar`가 있으면 `feature/foo`를 만들 수 없다. 그래서 **하이픈으로 잇는다**: `feature/{작업}-{트랙}`. `worktree-new.sh`가 슬래시를 막는다.
-
-### `node_modules`의 `rm -rf`는 거의 항상 한 번 실패한다
-
-```
-rm: .claude/worktrees/step-goal-presets/node_modules: Directory not empty
-```
-
-**정상이고, 내용은 이미 다 지워졌다.** macOS가 `rm`이 도는 동안 그 디렉터리에 `.DS_Store`를 다시 쓰고, `rm`은 내용을 비운 뒤 마지막에 `rmdir`을 시도하므로 그 틈에 생긴 파일 하나 때문에 `ENOTEMPTY`로 끝난다. 파일 44,471개를 지우는 동안 창이 넉넉히 열린다. 2026-07-27에 3번 시도해 3번 재현했고 이후에도 재현됐다.
-
-한 번 더 부르면 성공하고, 무시하고 `git worktree remove`로 넘어가도 된다. `worktree-drop.sh`가 재시도를 품고 있다.
-
-**`git worktree remove --force`로 넘어가지 마라.** 추적되지 않는 진짜 작업물(계획서, 개발 루프 기록)까지 함께 버린다.
+| `cp -Rc`가 실패한다 | APFS가 아니다. 스크립트가 `npm install`로 되돌아간다 |
+| `git worktree remove`가 느리거나 거부한다 | `node_modules`를 먼저 지우지 않았다. `worktree-drop.sh`가 순서와 재시도를 지킨다 |
 
 ## 워크트리를 격리하는 것은 설정이 아니라 점 디렉터리다
 
@@ -53,30 +22,9 @@ rm: .claude/worktrees/step-goal-presets/node_modules: Directory not empty
 | ESLint | 점 디렉터리를 기본 무시한다 (`File ignored by default.`) |
 | Prettier·jest | 글롭이 `{src,apps,libs,test}`, `rootDir`이 `src`라 애초에 `.claude/` 밖이다 |
 
-**그 격리의 대가가 IDE 지원이다.** 같은 이유로 저장소 루트를 열어 둔 편집기는 워크트리 파일을 어느 프로젝트에도 속하지 않은 것으로 취급해, `describe`·`it` 같은 jest 전역을 모르는 이름으로 표시한다. **워크트리를 별도 창으로 열어야 한다**(`.claude/rules/core.md`).
+그 격리의 대가(IDE 지원)와 루트 tsconfig 우회 금지는 `.claude/rules/workflow.md`에 있다.
 
-**루트 `tsconfig.json`에 워크트리를 포함시켜 해결하려 하지 마라.** 루트에서 `verify`를 돌릴 때 같은 클래스가 두 번 선언된 것으로 보인다.
-
-### git은 워크트리를 자동으로 무시하지 않는다
-
-**점 디렉터리 격리는 lint·포맷·타입 검사에만 통하고 git에는 통하지 않는다.** 워크트리가 하나라도 있으면 부모 저장소의 `git status`에 미추적으로 올라온다.
-
-```
-$ git status --porcelain
-?? .claude/worktrees/
-```
-
-여기서 `git add -A`를 쓰면 워크트리가 **embedded git repository로 커밋된다** — 경고는 나오지만 막아 주지는 않는다.
-
-```
-warning: adding embedded git repository: .claude/worktrees/__probe
-```
-
-들어가는 것은 파일이 아니라 gitlink 하나여서 diff에 내용이 보이지 않고, 그래서 **눈치채기 어렵다.** 워크트리 디렉터리가 비어 있는 동안에는 `git status`에도 나오지 않아(git이 빈 디렉터리를 무시한다) 평소에 확인해 두기도 어렵다.
-
-그래서 **`.gitignore`에 `/.claude/worktrees/`를 넣어 1차 방어선을 뒀다.** 규약이 `git add -A`를 금지하는 것만으로는 실수 한 번을 막지 못한다. 워크트리 안에서 작업할 때는 이 패턴이 워크트리 루트 기준으로 해석되므로 그 안의 `src/`는 영향받지 않는다.
-
-**`docs/`는 여전히 `.gitignore`에 없다.** 넣지 않은 이유는 `docs/todo-schema.md`처럼 추적해야 하는 문서가 같은 폴더에 있어서다. 즉 계획서와 개발 루프 기록은 "무시되는" 것이 아니라 **커밋하지 않기로 한 것뿐**이고, `git add -A`를 쓰면 그대로 들어간다. **커밋할 파일을 경로로 지정해라.**
+git 쪽 방어선으로 **`.gitignore`에 `/.claude/worktrees/`가 들어 있다.** `docs/`는 `.gitignore`에 없다 — `docs/todo-schema.md`처럼 추적해야 하는 문서가 같은 폴더에 있어서다. 즉 계획서와 개발 루프 기록은 "무시되는" 것이 아니라 **커밋하지 않기로 한 것뿐**이고, `git add -A`를 쓰면 그대로 들어간다. 커밋할 파일을 경로로 지정해라.
 
 ## lint · 포맷
 
@@ -96,20 +44,12 @@ npm run format:check  # 적용하지 않고 위반만 확인
 - Prettier는 **주석과 문자열을 재배치하지 않는다.** 긴 한국어 주석이 80자를 넘어도 그대로 남는다
 - `npm run lint`는 error에서만 실패한다. **`lint:check`에는 `--max-warnings 0`이 붙어 더 엄격하다** — `lint`는 통과했는데 훅이 막는 상황이 여기서 나온다
 
-## husky
+## husky (pre-commit)
 
-- **`prepare`가 `husky || true`인 이유는 프로덕션 설치다.** `npm ci --omit=dev`는 `prepare`를 실행하면서 `husky`(devDependency)를 설치하지 않아 `husky: command not found`로 exit 127이 되고, 설치 전체가 실패한다. `|| true`가 그것만 흡수한다. **부작용은 훅 설치 실패도 조용해진다는 것** — 훅이 걸렸는지는 `git config core.hooksPath`와 `.husky/_`의 존재로 확인해라
-- **훅이 없는 곳이 셋 있다.** (1) 클론 직후 `npm install` 전 (2) `.husky/_`가 없는 워크트리 (3) `HUSKY=0`이 설정된 셸. 셋 다 **경고 없이** 훅을 건너뛴다. 워크트리는 `worktree-new.sh`가 `npm run prepare`를 돌려 세운다
-- 로컬 훅은 강제 수단이 아니라 편의 장치다. `--no-verify`·`HUSKY=0`·`core.hooksPath` 변경으로 우회된다. **실제 강제는 CI의 몫이고 이 저장소에는 아직 CI가 없다**
+훅이 강제 수단이 아니라 편의 장치라는 일반 원리는 플러그인 `ref/troubleshooting.md`에 있다. 이 저장소의 구체화:
 
-규칙을 끄거나 낮출 때는 **반드시 이유를 주석으로 남긴다.** 전체를 끄기보다 파일 단위로 좁혀서 끈다.
+- **`prepare`가 `husky || true`인 이유는 프로덕션 설치다.** `npm ci --omit=dev`는 `prepare`를 실행하면서 `husky`(devDependency)를 설치하지 않아 `husky: command not found`로 exit 127이 되고, 설치 전체가 실패한다. `|| true`가 그것만 흡수한다. **부작용은 훅 설치 실패도 조용해진다는 것** — 훅이 걸렸는지는 `git config core.hooksPath`와 `.husky/_`의 존재로 확인해라. 워크트리는 `worktree-new.sh`가 `npm run prepare`를 돌려 세운다
+- **훅은 `verify`만 돌린다.** `npm test`·`npm run test:e2e`는 훅이 돌려 주지 않는다 — 테스트를 깨뜨린 커밋을 막는 자동 관문은 이 저장소에 없고, 실제 강제는 CI의 몫인데 **아직 CI가 없다**
+- 훅의 `verify`는 인덱스가 아니라 **프로젝트 전역(작업트리)을 본다.** 부분 스테이징 커밋에서 생기는 사각지대의 일반 원리는 플러그인 `rules/core.md`의 커밋 절에 있다. 스테이징된 내용만 꺼내 검사하려면 `lint-staged`가 필요한데 도입은 결정된 바 없다
 
-```js
-// .eslintrc.js — 파일 단위로 좁혀서 끈다
-{
-  files: ['*.spec.ts'],
-  rules: { '@typescript-eslint/no-unsafe-assignment': 'off' },
-}
-```
-
-`.eslintrc.js`가 `@typescript-eslint/no-explicit-any`를 끈 것이 예다. 끄거나 낮춘 자리마다 왜 그랬는지와 되돌릴 조건을 함께 남긴다.
+규칙을 끄거나 낮출 때는 **반드시 이유를 주석으로 남긴다.** 전체를 끄기보다 파일 단위로 좁혀서 끈다. `.eslintrc.js`가 `*.spec.ts`에서 `@typescript-eslint/no-unsafe-assignment`를 끄고 `@typescript-eslint/no-explicit-any`를 전역에서 끈 것이 그 예다 — 끄거나 낮춘 자리마다 왜 그랬는지와 되돌릴 조건을 함께 남긴다.

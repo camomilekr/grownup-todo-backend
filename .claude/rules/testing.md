@@ -71,7 +71,7 @@ npm run test:cov
 
 ## 테스트가 예상과 다르게 동작하면
 
-**`.claude/ref/testing-traps.md`를 읽어라.** 이 저장소에서 실제로 막혔던 것만 모아 뒀고 대응이 직관과 다르다 — 전역 상태가 파일 안에서만 남는 것, `BigInt`가 `JSON.stringify`를 거부하는 것, `@db.Date`가 UTC로 저장돼 날짜가 하루 밀리는 것, **고치기 전에도 통과해서 아무것도 지키지 못하는 테스트**를 알아보는 방법이 거기 있다.
+두 곳을 본다 — **일반적인 jest 함정**(전역 상태가 파일 안에서만 남는 것, **고치기 전에도 통과해서 아무것도 지키지 못하는 테스트**를 알아보는 방법)은 git-workflow 플러그인의 `ref/testing-traps.md`에, **이 저장소 고유 함정**(`BigInt`가 `JSON.stringify`를 거부하는 것, `@db.Date`가 UTC로 저장돼 날짜가 하루 밀리는 것)은 `.claude/ref/testing-traps.md`에 있다. 전부 실제로 막혔던 것이고 대응이 직관과 다르다.
 
 ## 커밋 전
 

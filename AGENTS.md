@@ -18,22 +18,23 @@ pre-commit 훅은 `verify`만 돌린다. **테스트를 깨뜨린 커밋을 막�
 
 ## 작업 규약의 위치
 
-상세 규약은 `.claude/rules/` 아래에 있고, Claude Code에서는 세션 시작 시 자동으로 컨텍스트에 들어온다. 다른 에이전트라면 작업 전에 직접 읽는다.
+**개발 루프 전체(작업 크기별 절차인 티어, 계획·구현·검토 파이프라인, 브랜치·커밋·PR 규칙)는 git-workflow 플러그인이 제공한다.** Claude Code에서는 세션 시작 시 플러그인 규칙과 아래 `.claude/rules/`가 자동으로 컨텍스트에 들어온다. 다른 에이전트라면 작업 전에 직접 읽는다.
 
 | 문서 | 내용 |
 |---|---|
-| `.claude/rules/core.md` | 개발 루프 전체 — 작업 크기별 절차(티어), 브랜치·커밋·PR 규칙, 오케스트레이터 규약 |
+| `.claude/rules/workflow.md` | git-workflow 플러그인 규칙의 이 저장소 구체화 — Jira 없이 진행, 워크트리·지문 스크립트, 참조 문서 분담 |
 | `.claude/rules/nestjs.md` | NestJS 코드 규약 — 폴더 배치, 계층 책임, 의존성 주입, 검증, 예외, 로깅 |
 | `.claude/rules/testing.md` | 테스트 규약 — TDD(Test-Driven Development, 실패하는 테스트를 먼저 쓰는 개발 순서), 무엇을 테스트하는지, 파일 배치 |
 | `.claude/rules/CONTEXT.md` | 폴더별 `CONTEXT.md` 관리 규칙 |
 
-막혔을 때만 읽는 참조 문서는 `.claude/ref/` 아래에 있다 — `troubleshooting.md`(명령 실패), `testing-traps.md`(테스트가 예상과 다를 때), `incidents.md`(규약의 근거).
+막혔을 때만 읽는 참조 문서는 두 곳에 나뉜다 — 일반 함정은 플러그인 `ref/`에, 이 저장소 고유 함정은 `.claude/ref/`(`troubleshooting.md`, `testing-traps.md`)에 있다. 분담 표는 `.claude/rules/workflow.md`.
 
 ## 핵심 규칙 요약
 
 다른 에이전트를 위해 가장 자주 걸리는 것만 추린다. 충돌하면 `.claude/rules/`가 우선한다.
 
 - **기준 브랜치는 `develop`이다.** 브랜치는 `feature/{케밥케이스}`, PR(Pull Request)도 `develop`으로 보낸다. `develop`에 직접 커밋·푸시하지 않는다. `main`은 릴리스 절차 밖에서 손대지 않는다
+- **이 저장소에는 연결된 Jira 프로젝트가 없다.** 티켓 없이 진행이 기본값이고, Jira 조회·상태 전환은 전부 스킵한다
 - **TDD로 개발한다.** 실패하는 테스트를 먼저 쓰고 실패를 실제로 확인한 뒤 통과시킨다. 버그 수정은 재현 테스트부터
 - **테스트 파일은 `*.spec.ts`이고 대상 파일 옆에 둔다.** `.test.ts`로 쓰면 jest `testRegex`에 걸리지 않아 실행되지 않는다. DB에 실제로 붙는 테스트만 `test/` 아래(e2e)
 - **`src/` 하위 폴더를 건드리기 전에 그 폴더의 `CONTEXT.md`를 읽고, 작업이 끝나면 갱신한다**
