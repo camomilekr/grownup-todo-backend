@@ -17,9 +17,24 @@ import {
  * 5에서 8로 올렸을 때 5를 채웠던 날의 달성률이 100%에서 62%로 소급해 바뀌는 것을 막기
  * 위해서다.
  *
- * **`userId`는 반드시 `todoTemplate`에서 가져와 채워라.** 로그인한 사용자 정보에서
- * 채우면 남의 할 일에 자기 기록을 붙이는 요청이 통과한다. DB에 걸린 복합 외래키가
- * 막아 주긴 하지만 그때 나오는 것은 원인을 알기 어려운 제약 위반 오류다.
+ * **`userId`에는 요청자의 식별자를 넣는다.** 이 값이 두 곳에 쓰이고 둘 다 요청자를
+ * 가리켜야 맞다.
+ *
+ * 하나는 `upsertForHistoriedOn`의 **소유자 검사**다. 그 확인 조회가 `(todoId, userId)`로
+ * 정의를 찾으므로, 요청자를 넣으면 남의 할 일에 기록을 붙이려는 요청이 그 자리에서
+ * `TodoTemplateNotFoundError`로 걸린다. 다른 하나는 저장될 `todo_history.user_id` 컬럼
+ * 값이고, 요청자가 주인일 때만 저장까지 가므로 결과적으로 정의의 소유자와 같아진다.
+ *
+ * **정의 행에서 읽은 값을 그대로 옮기면 그 검사가 무력화될 수 있다.** 소유자로 좁혀 읽은
+ * 정의(`TodoTemplatesRepository.findById(userId, todoId)`)라면 그 `userId`가 요청자와
+ * 같아 결과가 다르지 않다. 위험한 것은 **좁히지 않고 읽은 정의**다 — 그때는 그 정의와
+ * 자기 자신을 비교하는 동어반복이 되어 아무것도 거르지 못한다. 요청자 A가 C의 할 일
+ * 번호를 보내면 `{ todoId: C의 할 일, userId: C }`가 만들어지고 확인 조회와 복합 외래키를
+ * 모두 통과해 **A가 C의 할 일에 기록을 쓴다.**
+ *
+ * 복합 외래키가 최후의 방어로 남아 있지만 그것에 기대지 마라. 위 경로는 그것도 통과하고,
+ * 걸리는 경우에도 나오는 것은 원인을 알기 어려운 제약 위반 오류(`P2003`, 참조 대상이
+ * 없다)다.
  */
 export type TodoHistorySnapshot = {
   todoId: bigint;
@@ -53,6 +68,11 @@ export type TodoHistoryChanges = {
  * 않았다 — 문서로 경고하는 대신 **없는 메서드는 부를 수 없게** 했다. `deletedAt`이
  * 찍히는 경로는 **할 일 자체가 지워질 때 하나뿐**이고, 그것은
  * `TodoTemplatesRepository.softDelete`가 한 트랜잭션에서 처리한다.
+ *
+ * **이 클래스만으로는 그 금지가 성립하지 않는다.** 정의 쪽 입력 타입 둘
+ * (`CreateTodoTemplateInput`·`UpdateTodoTemplateInput`)이 완료 기록으로 이어지는 중첩
+ * 관계 경로를 `Omit`으로 빼야 나머지 절반이 막힌다 — 그 경로가 열려 있으면 정의를
+ * 고치는 `update` 하나로 기록을 행째로 지울 수 있다.
  *
  * **완료를 취소하는 것은 삭제가 아니다.** `completedAt`을 비우는 수정이고 행은 그대로
  * 남는다.
@@ -103,10 +123,20 @@ export class TodoHistoriesRepository {
     snapshot: TodoHistorySnapshot,
     changes: TodoHistoryChanges,
   ): Promise<TodoHistory> {
-    // 삭제 여부를 조건에 넣지 않고 행을 그대로 가져온다. 조건에 넣으면 "지워졌다"와
+    // 삭제 여부는 조건에 넣지 않고 행을 그대로 가져온다. 조건에 넣으면 "지워졌다"와
     // "애초에 없다"가 똑같이 빈 결과로 돌아와 구분할 수 없다.
+    //
+    // **소유자는 조건에 넣는다.** 남의 할 일은 "없는 것"과 같게 다루는 것이 옳고, 넣지
+    // 않으면 이 확인을 통과한 뒤 저장 단계에서 복합 외래키에 걸려 `P2003`(참조 대상이
+    // 없다)으로 실패한다. 막히기는 하지만 **그 오류는 원인을 알기 어렵다** — 로그를 보는
+    // 사람이 제약 이름부터 되짚어야 하고, 정작 원인은 소유자가 어긋났다는 것이다.
+    //
+    // `@@unique([todoId, userId])`가 있어 복합 유일 키로 조회할 수 있다. 그 제약은 원래
+    // 기록 쪽 복합 외래키의 참조 대상을 만들려고 둔 것인데, 여기서 한 번 더 쓰인다.
     const template = await this.prisma.todoTemplate.findUnique({
-      where: { todoId: snapshot.todoId },
+      where: {
+        todoId_userId: { todoId: snapshot.todoId, userId: snapshot.userId },
+      },
       select: { deletedAt: true },
     });
 
@@ -129,7 +159,9 @@ export class TodoHistoriesRepository {
     });
   }
 
+  /** 그 날짜의 기록 한 건. 남의 것이거나 지워졌으면 `null`이다. */
   async findByTodoIdAndHistoriedOn(
+    userId: bigint,
     todoId: bigint,
     historiedOn: Date,
   ): Promise<TodoHistory | null> {
@@ -139,13 +171,74 @@ export class TodoHistoriesRepository {
     // 할 일의 삭제 여부도 함께 본다. 할 일을 지우면 기록에도 삭제 표시가 찍히므로
     // 보통은 앞 조건만으로 걸러지지만, 저장 거절과 삭제가 겹치는 아주 좁은 시간차에
     // 만들어진 기록은 그 표시가 없다.
+    //
+    // 소유자는 정의를 따라가지 않고 기록 쪽 컬럼으로 본다. 복합 외래키가 둘의 일치를
+    // 보장하므로 결과는 같고, `@@index([userId, historiedOn])`을 쓸 수 있다.
     return this.prisma.todoHistory.findFirst({
       where: {
         todoId,
+        userId,
         historiedOn,
         deletedAt: null,
         template: { deletedAt: null },
       },
+    });
+  }
+
+  /**
+   * 한 할 일의 **기간 범위 기록**. 매일 반복 할 일의 상세 화면이 날짜별 이력을 그린다.
+   *
+   * 범위를 인자로 받는 이유는 전체를 돌려주면 오래 쓴 할 일에서 결과가 무한히 커지기
+   * 때문이다. **양 끝 날짜를 포함한다** — 사용자가 고른 날짜는 그 날도 포함한다고 읽는
+   * 것이 자연스럽다. (활성 기간은 순간 컬럼이 되면서 반열림으로 갔지만, 이쪽은 날짜
+   * 알갱이 그대로라 그 이유가 적용되지 않는다 — 날짜에는 "그날의 끝"이 필요 없다.)
+   *
+   * `historiedOn` 오름차순으로 돌려준다. 화면이 시간 순서로 그리고, 같은 할 일에 같은
+   * 날짜 기록이 하나뿐이라 **이 정렬키 하나로 순서가 완전히 정해진다**(다른 목록 조회들이
+   * 2차 정렬키를 두는 이유는 `createdAt`이 겹칠 수 있기 때문인데, 여기서는 그 문제가 없다).
+   *
+   * **기록과 할 일 양쪽의 삭제 여부를 본다.** 할 일을 지울 때 그 시점의 기록에 삭제
+   * 표시를 찍지만 그것은 지우는 순간에 있던 기록만 덮으므로, 저장 거절과 삭제가 겹치는
+   * 좁은 시간차로 그 뒤에 만들어진 기록은 표시가 없다.
+   *
+   * ### 아래 `findDailyHistoriesOn`과 달리 반복 방식을 조건에 넣지 않았다
+   *
+   * 그 메서드가 `template: { completeType: 'DAILY' }`를 넣는 이유는 **결과가 여러 할 일의
+   * 기록이 섞인 목록**이기 때문이다. 완료 기록에는 반복 방식이 저장되지 않으므로 받는
+   * 쪽에서 일회성을 나중에 걸러 낼 방법이 없어 쿼리로 못 박아야 한다.
+   *
+   * 이쪽은 `todoId`를 조건으로 받아 **결과가 전부 한 할 일의 기록**이다. 섞일 것이 없고
+   * 부르는 쪽은 그 할 일의 반복 방식을 이미 알고 있다(정의를 읽어야 이 메서드를 부를 수
+   * 있다). 그래서 걸러 낼 수 없다는 문제가 생기지 않는다.
+   *
+   * **오히려 조건을 넣으면 조용한 오류가 생긴다.** 일회성 `todoId`로 부르면 빈 배열이
+   * 돌아와 "기록이 없다"와 구별되지 않는다. 조건이 없으면 기록이 그대로 나오고, 그 값을
+   * 표시용 날짜로 내보내려는 시도는 뷰 계층이 두 겹으로 막는다 — `todo-view.ts`가 이력
+   * 항목 변환 함수를 내보내지 않고, 그 유일한 통로인 `toDailyTodoDetail`이 매일 반복으로
+   * 좁혀진 정의만 받는다.
+   *
+   * **부르는 코드가 생겨서 확인했고 넣지 않는 것으로 정했다** — `TodosService.getTodo`가
+   * 정의를 매일 반복으로 좁힌 뒤에만 부르므로 위 근거가 타입으로 보장된다.
+   *
+   * @param from 범위 시작일(포함). 유저 타임존 기준 날짜 키(UTC 자정 `Date`)이고,
+   *   부르는 쪽(`TodosService.getTodo`)이 범위 순간을 `toLocalDateKey`로 잘라 만든다
+   * @param until 범위 종료일(포함)
+   */
+  async findByTodoIdBetween(
+    userId: bigint,
+    todoId: bigint,
+    from: Date,
+    until: Date,
+  ): Promise<TodoHistory[]> {
+    return this.prisma.todoHistory.findMany({
+      where: {
+        todoId,
+        userId,
+        historiedOn: { gte: from, lte: until },
+        deletedAt: null,
+        template: { deletedAt: null },
+      },
+      orderBy: { historiedOn: 'asc' },
     });
   }
 

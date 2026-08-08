@@ -1,6 +1,6 @@
 # CONTEXT
 
-> 마지막 업데이트: 2026-07-31
+> 마지막 업데이트: 2026-08-08
 
 ## 역할
 
@@ -33,16 +33,19 @@ enum은 `CompleteType`(일회성 `ONCE`·매일 반복 `DAILY`)과 `TodoType`(�
 
 지운 기록도 이 제약의 대상이라 그 자리를 계속 차지한다. **한 번 지운 기록은 되살리지 않는다** — 완료 취소는 삭제가 아니라 `completed_at`을 비우는 수정이다.
 
-### Prisma가 표현하지 못해 SQL에 손으로 넣은 것 — 둘 다 `migrate diff`가 보지 못한다
+### Prisma가 표현하지 못해 SQL에 손으로 넣은 것 — 셋 다 `migrate diff`가 보지 못한다
 
-마이그레이션 SQL 맨 아래에 **RLS 블록과 코멘트 블록**이 손으로 들어가 있다. **마이그레이션을 다시 뽑을 때 반드시 두 블록을 옮겨 붙여라.**
+마이그레이션 SQL에 **RLS 블록·코멘트 블록·CHECK 제약**이 손으로 들어가 있다. **마이그레이션을 다시 뽑을 때 반드시 이 블록들을 옮겨 붙여라.**
 
 | | 왜 손으로 넣는가 | 빠지면 |
 |---|---|---|
 | `ENABLE ROW LEVEL SECURITY` × 4 — 세 테이블 + `_prisma_migrations`(이쪽만 `IF EXISTS`) | Prisma 스키마에 RLS 문법이 없다 | anon 키만으로 전 데이터가 열린다 (아래) |
 | `COMMENT ON TABLE` 3 + `COMMENT ON COLUMN` 32 | **Prisma의 `///` 주석은 DB로 가지 않는다** — 생성된 TS 클라이언트의 JSDoc으로만 들어간다 | psql·DataGrip·Supabase 대시보드에서 컬럼 이름만 보인다 |
+| `CHECK` 제약 `todo_template_active_period_check`(`20260807162419_active_period_check`) — 두 값이 모두 있으면 `active_from < active_until`, 등호 없음(반열림이라 같으면 빈 구간), NULL은 무제한이라 허용 | Prisma 스키마에 CHECK 문법이 없다 | `updateTodo`의 동시 수정 패자가 뒤집힌·빈 활성 기간을 저장한다 — 정상 경로는 `assertShape`가 400으로 먼저 막지만 읽기와 쓰기 사이에 잠금이 없다 |
 
-**`migrate diff`는 둘 중 어느 것도 비교하지 않는다.** 빠져도 `migrate status`·`migrate diff`·`verify`·나머지 테스트가 전부 초록으로 통과한다(drift 검사가 `No difference detected.`로 통과하는 것을 확인했다). **유일한 관문은 `test/schema-guard.e2e-spec.ts`다** — `public`을 훑어 RLS가 꺼진 테이블이나 코멘트 없는 테이블·컬럼이 하나라도 있으면 실패한다. **목록을 하드코딩하지 않았으므로 앞으로 추가하는 테이블·컬럼에도 자동으로 적용된다.**
+**`migrate diff`는 셋 중 어느 것도 비교하지 않는다.** 빠져도 `migrate status`·`migrate diff`·`verify`·나머지 테스트가 전부 초록으로 통과한다(drift 검사가 `No difference detected.`로 통과하는 것을 RLS·코멘트는 이전에, CHECK는 2026-08-08에 `--exit-code`로 실측했다). RLS와 코멘트의 관문은 `test/schema-guard.e2e-spec.ts`다 — `public`을 훑어 RLS가 꺼진 테이블이나 코멘트 없는 테이블·컬럼이 하나라도 있으면 실패한다. **목록을 하드코딩하지 않았으므로 앞으로 추가하는 테이블·컬럼에도 자동으로 적용된다.** CHECK의 관문은 `test/todos.e2e-spec.ts`의 "활성 기간 CHECK 제약" 절이다 — 제약이 빠진 DB에서는 직접 삽입·갱신이 거절되지 않아 실패한다.
+
+**CHECK 위반이 코드에 어떤 오류로 오는가(2026-08-08 실측, Prisma 7.9.1)**: `@prisma/adapter-pg`가 `23514`(check_violation)를 따로 매핑하지 않아 `PrismaClientKnownRequestError` 코드 **`P2039`**(Database error)로 감싸져 온다. SQLSTATE는 `meta.driverAdapterError.cause.code`(`'23514'`)에 구조화되어 있고, **제약 이름은 구조화된 필드가 없어 `cause.message` 문자열 안에만 있다.** `TodosService`의 409 변환이 그 경로로 판별한다.
 
 **RLS는 예외가 없다 — `_prisma_migrations`도 켠다.** 그 테이블도 default ACL로 `anon`에게 전권이 붙는데, 지워지면 다음 `migrate deploy`가 첫 마이그레이션을 재적용하려 들어 `CREATE TABLE`에서 깨지고, 가짜 행이 들어가면 적용되지 않은 마이그레이션이 조용히 건너뛰어진다.
 
@@ -62,7 +65,15 @@ enum은 `CompleteType`(일회성 `ONCE`·매일 반복 `DAILY`)과 `TodoType`(�
 
 ### DB가 강제하는 것과 코드가 지켜야 하는 것
 
-**소유자 일치는 DB가 강제한다.** `todo_history`는 `(todo_id, user_id)` **복합 FK**로 `todo_template`을 참조한다(`todo_history_todo_id_user_id_fkey`). 그래서 남의 `todoId`에 자기 `userId`를 붙인 행은 삽입 자체가 거절된다 — 실측하면 `insert or update on table "todo_history" violates foreign key constraint "todo_history_todo_id_user_id_fkey"`다. 이 FK의 참조 대상을 만들기 위해 `todo_template`에 `@@unique([todoId, userId])`가 있다(PK와 논리적으로 중복이지만 Postgres가 복합 FK에 유니크 제약을 요구한다). **`user_id`는 그래도 반드시 template에서 복제해라** — FK는 값이 일치하는지만 보고 어디서 왔는지는 모른다.
+**소유자 일치는 DB가 강제한다. 다만 "일치"의 뜻이 좁다.** `todo_history`는 `(todo_id, user_id)` **복합 FK**로 `todo_template`을 참조한다(`todo_history_todo_id_user_id_fkey`). 그래서 남의 `todoId`에 자기 `userId`를 붙인 행은 삽입 자체가 거절된다 — 실측하면 `insert or update on table "todo_history" violates foreign key constraint "todo_history_todo_id_user_id_fkey"`다. 이 FK의 참조 대상을 만들기 위해 `todo_template`에 `@@unique([todoId, userId])`가 있다(PK와 논리적으로 중복이지만 Postgres가 복합 FK에 유니크 제약을 요구한다).
+
+**그 FK가 강제하는 것은 "기록에 적힌 소유자가 그 할 일의 실제 소유자인가"다. "요청자가 그 소유자인가"는 강제하지 못한다** — DB는 요청자가 누구인지 모른다. 그 둘의 차이가 코드의 몫이고, `TodoHistoriesRepository.upsertForHistoriedOn`의 확인 조회가 그 자리를 맡는다(`(todo_id, user_id)`로 정의를 찾아 없으면 거절한다).
+
+**그래서 `user_id`에 넣는 값은 요청자의 식별자여야 한다.** FK는 값이 일치하는지만 보고 **어디서 왔는지는 모른다.** 소유자로 좁히지 않고 읽은 정의에서 복제하면 그 값이 제3자의 것이어도 정의와 일치하므로 **FK도, 앞서는 소유자 검사도 둘 다 통과한다.** 근거와 실패 경로는 `src/todos/todo-histories.repository.ts`의 `TodoHistorySnapshot` 주석에 있다.
+
+**이 지시는 한 곳에 있지 않았다.** 코드 주석·스키마 주석·폴더 문서·저장소 문서·마이그레이션 SQL, 그리고 **실제 DB의 컬럼 코멘트**까지 여러 계층에 같은 말이 흩어져 있었고 방향을 뒤집을 때 전부 찾아야 했다. **그래서 이런 서술을 고칠 때는 저장소를 `grep`하는 것만으로 부족하다** — DB 코멘트와 `prisma generate` 산출물까지 봐야 한다.
+
+**어긋남을 잡아 주는 자동 관문은 없다.** `test/schema-guard.e2e-spec.ts`는 코멘트의 **존재**만 보고 내용을 비교하지 않으며(목록을 하드코딩하지 않는 설계의 대가다), `migrate diff`도 코멘트를 비교 대상에 넣지 않는다. **컬럼 코멘트만 고치는 마이그레이션은 `--create-only`로 만들면 빈 파일이 나오는 것이 정상이고**(구조 차이가 없다) 거기에 `COMMENT ON COLUMN`을 손으로 넣는다.
 
 **ONCE의 "히스토리 한 건"은 DB가 강제하지 못한다.** 제약은 `(todo_id, historied_on)` 하나뿐이라 DAILY의 "날짜별 한 행"만 직접 표현한다. ONCE가 단건이 되는 것은 **`historied_on`이 template당 하나로 고정되기 때문**이고, 그 값을 만드는 것은 `src/todos/todo-local-date.ts`의 `toHistoriedOn` 하나다.
 
@@ -77,14 +88,17 @@ enum은 `CompleteType`(일회성 `ONCE`·매일 반복 `DAILY`)과 `TodoType`(�
 
 ### 입력 경계에서 검증·정규화해야 하는 것 (아직 아무것도 없다)
 
-DTO 계층이 생기는 라운드가 **이 넷을 한 묶음으로** 처리해야 한다. 지금은 어느 것도 DB가 막지 않는다.
+DTO 계층이 생기는 라운드가 **이 셋을 한 묶음으로** 처리해야 한다. 지금은 어느 것도 DB가 막지 않는다.
 
 | 컬럼 | 무엇이 필요한가 | 막지 않으면 |
 |---|---|---|
 | `app_user.email` | `trim()` + `toLowerCase()` | 같은 사람이 두 계정을 갖는다 |
 | `app_user.time_zone` | IANA 이름인지 (`Intl.supportedValuesOf('timeZone')`) | `toLocalDateKey`가 `RangeError`를 던져 **그 유저의 모든 날짜 계산이 영구히 실패한다** |
 | `todo_template.remind_at` | `HH:mm` 형식인지 (00~23시, 00~59분). 정규식은 표 아래에 | 스캔이 문자열 동등 비교라 **에러 없이 영원히 알림이 오지 않는다** |
-| `todo_template.active_from`/`active_until` | 날짜 문자열 → `parseLocalDateKey` | 손으로 만든 `Date`는 하루 밀려 저장된다 |
+
+`todo_template.active_from`/`active_until`은 이 표에서 빠졌다. 순간 컬럼(`timestamptz`)이
+되면서(마이그레이션 `20260805123230_active_period_timestamptz`) `should_do_at`과 같은
+성질이 됐고, 날짜 형식 검증이 필요 없다 — 시간 해석은 클라이언트의 몫이다(사용자 확정).
 
 `remind_at`에 쓸 정규식이다. 표 안에 두면 마크다운이 파이프를 열 구분자로 읽어 표가
 깨지므로(이스케이프하면 렌더링은 되지만 raw 텍스트에서 복사하면 틀린 식이 된다) 여기에
@@ -94,7 +108,23 @@ DTO 계층이 생기는 라운드가 **이 넷을 한 묶음으로** 처리해�
 @Matches(/^([01]\d|2[0-3]):[0-5]\d$/)
 ```
 
-**`@db.Date` 컬럼(`historied_on`, `active_from`, `active_until`)에 넘기는 `Date`는 UTC 컴포넌트로 직렬화된다.** `@prisma/adapter-pg`의 `formatDate`가 `getUTCFullYear`/`getUTCMonth`/`getUTCDate`를 쓴다. 로컬 타임존 자정 `Date`를 넘기면 하루가 밀리므로 **손으로 만들지 말고** `src/todos/todo-local-date.ts`의 세 함수(`toHistoriedOn`·`toLocalDateKey`·`parseLocalDateKey`)가 만든 값을 쓴다. 히스토리 키는 **반드시 `toHistoriedOn`**을 거친다 — `completeType`에 따라 규칙이 갈리고 그 선택을 호출자에게 맡기면 틀려도 아무것도 실패하지 않는다.
+### 날짜·시각 컬럼에 어떤 타입을 쓰는가
+
+**순간을 담는 컬럼은 `@db.Timestamptz(3)`, 달력의 날짜를 담는 컬럼은 `@db.Date`다.** 생성·수정·삭제 시각과 `should_do_at`·`completed_at`·`active_from`·`active_until`이 앞쪽이고, 날짜 컬럼은 이제 `historied_on` 하나다. 타임존 없는 `timestamp`를 쓰는 컬럼은 하나도 없다.
+
+**활성 기간 두 컬럼은 원래 `@db.Date`였다가 `timestamptz(3)`로 바뀌었다**(마이그레이션 `20260805123230_active_period_timestamptz`) — 서버가 시간 처리를 하지 않고 클라이언트가 해석한다는 전제가 확정되면서다. 판정의 의미도 함께 바뀌어 반열림 구간(`active_from <= 순간 < active_until`)이다 — 그 마이그레이션이 기존 행의 포함 종료일을 하루 더해 미포함 상한으로 보정하고 컬럼 코멘트도 갱신한다.
+
+**`timestamptz`는 이름과 달리 타임존을 저장하지 않는다.** 받은 값을 협정 세계시(Coordinated Universal Time, UTC)로 정규화하고 타임존은 버린다 — 서울 시각 9시와 협정 세계시 자정을 각각 넣으면 저장된 값이 같아진다(실측). 그래서 이 타입이 가리키는 것은 표기가 아니라 순간 하나다.
+
+**유저별 타임존 변환은 그 순간이 있어야 성립한다.** 같은 값 하나가 서울에서는 8월 1일 09:30이고 뉴욕에서는 7월 31일 20:30이라 날짜까지 갈리는데, 매일 반복하는 할 일의 "오늘"을 유저마다 다르게 계산하는 것이 정확히 그 연산이다.
+
+**`timestamp`로 바꾸면 잃는 것이 크다.** 표기의 타임존을 버려 벽시계 숫자만 남으므로 어느 지역 시각인지 값이 말해 주지 않고, node-postgres는 그것을 읽을 때 실행 환경의 로컬 타임존으로 해석한다 — 같은 `2026-08-01 00:00:00`이 프로세스 타임존이 `Asia/Seoul`일 때 `2026-07-31T15:00:00Z`로, `UTC`일 때 `2026-08-01T00:00:00Z`로 읽히는 것을 확인했다. **서버 타임존이 바뀌면 같은 행이 다른 순간이 된다.** 이미 저장된 값에서 어느 지역 시각이었는지 복원할 방법이 없어 되돌리기도 어렵다.
+
+**`date`는 반대로 타임존이 붙으면 안 된다.** 사용자가 캘린더에서 고른 "8월 1일"은 어느 지역에서 보든 8월 1일이어야 한다.
+
+**`@db.Date` 컬럼(`historied_on`)에 넘기는 `Date`는 UTC 컴포넌트로 직렬화된다.** `@prisma/adapter-pg`의 `formatDate`가 `getUTCFullYear`/`getUTCMonth`/`getUTCDate`를 쓴다. 로컬 타임존 자정 `Date`를 넘기면 하루가 밀리므로 **손으로 만들지 말고** `src/todos/todo-local-date.ts`의 세 함수(`toHistoriedOn`·`toLocalDateKey`·`parseLocalDateKey`)가 만든 값을 쓴다. 히스토리 키는 **반드시 `toHistoriedOn`**을 거친다 — `completeType`에 따라 규칙이 갈리고 그 선택을 호출자에게 맡기면 틀려도 아무것도 실패하지 않는다.
+
+### Prisma 명령에서 걸리는 것
 
 **`prisma migrate dev`는 클라이언트를 재생성하지 않는다.** Prisma 7에서 달라진 점이고, 스키마를 바꾼 뒤 `npx prisma generate`를 따로 돌리지 않으면 `src/generated/prisma`가 낡은 채로 남아 typecheck가 없는 모델을 모른다고 한다.
 

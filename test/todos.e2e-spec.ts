@@ -1,6 +1,9 @@
 import { INestApplication } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { AppModule } from './../src/app.module';
+// `Prisma`를 값으로 가져온다 — CHECK 제약 위반의 오류 종류를 `instanceof`로
+// 단정해야 하기 때문이다. 코드 문자열만 보면 그 속성을 가진 아무 객체나 통과한다.
+import { Prisma } from './../src/generated/prisma/client';
 import { PrismaService } from './../src/prisma/prisma.service';
 import { TodoHistoriesRepository } from './../src/todos/todo-histories.repository';
 import {
@@ -8,6 +11,7 @@ import {
   TodoTemplateNotFoundError,
 } from './../src/todos/todo-errors';
 import { TodoTemplatesRepository } from './../src/todos/todo-templates.repository';
+import { TodosService } from './../src/todos/todos.service';
 import {
   parseLocalDateKey,
   toHistoriedOn,
@@ -27,9 +31,17 @@ describe('Todos Repository (e2e)', () => {
   let templates: TodoTemplatesRepository;
   let histories: TodoHistoriesRepository;
   let userId: bigint;
+  // 소유자 경계를 검증할 두 번째 유저. 이 유저의 할 일이 `userId`의 조회·수정에
+  // 잡히면 안 된다.
+  let otherUserId: bigint;
 
   // 유저 타임존은 KST로 고정한다. 날짜 경계가 UTC와 겹치지 않아 어긋남이 드러난다.
   const timeZone = 'Asia/Seoul';
+
+  function uniqueEmail(prefix: string): string {
+    // 병렬 실행·재실행에서 유니크 충돌이 나지 않게 매번 다른 값을 쓴다.
+    return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2)}@example.test`;
+  }
 
   beforeAll(async () => {
     const moduleFixture: TestingModule = await Test.createTestingModule({
@@ -43,19 +55,23 @@ describe('Todos Repository (e2e)', () => {
     templates = app.get(TodoTemplatesRepository);
     histories = app.get(TodoHistoriesRepository);
 
-    const user = await prisma.appUser.create({
-      data: {
-        // 병렬 실행·재실행에서 유니크 충돌이 나지 않게 매번 다른 값을 쓴다.
-        email: `todos-e2e-${Date.now()}-${Math.random().toString(36).slice(2)}@example.test`,
-        timeZone,
-      },
-    });
+    const [user, otherUser] = await Promise.all([
+      prisma.appUser.create({
+        data: { email: uniqueEmail('todos-e2e'), timeZone },
+      }),
+      prisma.appUser.create({
+        data: { email: uniqueEmail('todos-e2e-other'), timeZone },
+      }),
+    ]);
     userId = user.userId;
+    otherUserId = otherUser.userId;
   });
 
   afterAll(async () => {
     // cascade로 template·history가 함께 지워진다.
-    await prisma.appUser.delete({ where: { userId } });
+    await prisma.appUser.deleteMany({
+      where: { userId: { in: [userId, otherUserId] } },
+    });
     await app.close();
   });
 
@@ -73,7 +89,7 @@ describe('Todos Repository (e2e)', () => {
         activeFrom: parseLocalDateKey('2026-08-01'),
       });
 
-      const found = await templates.findById(created.todoId);
+      const found = await templates.findById(userId, created.todoId);
 
       expect(found?.title).toBe('물 마시기');
       // BigInt PK가 왕복한다.
@@ -91,29 +107,31 @@ describe('Todos Repository (e2e)', () => {
         targetUnit: '회',
       });
 
-      const found = await templates.findById(created.todoId);
+      const found = await templates.findById(userId, created.todoId);
 
       // Prisma.Decimal은 문자열로 비교한다. Number로 바꾸면 정밀도가 깨진다.
       expect(found?.targetValue?.toString()).toBe('30.5');
     });
 
-    it('@db.Date 컬럼이 UTC 자정 Date로 돌아온다', async () => {
-      // 계획서가 확인하지 못한 항목이다. 쓰기 경로는 어댑터 소스로 확인했지만
-      // 읽기는 쿼리 컴파일러가 파싱하므로 실제로 왕복하는지 여기서 고정한다.
+    it('활성 기간이 시각을 보존해 왕복한다', async () => {
+      // `active_from`/`active_until`은 순간 컬럼(`timestamptz`)이다. 이전의 날짜
+      // 컬럼(`@db.Date`)이었다면 어댑터가 UTC 날짜 컴포넌트만 직렬화해 시각이
+      // **예외 없이** 자정으로 잘렸다 — 그 회귀를 이 왕복이 잡는다. 시간 해석은
+      // 클라이언트의 몫이므로 서버는 받은 순간을 그대로 저장하고 그대로 돌려준다.
       const created = await templates.create({
         userId,
         title: '아침 산책',
         todoType: 'GENERAL',
         completeType: 'DAILY',
-        activeFrom: parseLocalDateKey('2026-08-01'),
-        activeUntil: parseLocalDateKey('2026-08-31'),
+        activeFrom: new Date('2026-08-01T10:30:00.000Z'),
+        activeUntil: new Date('2026-08-31T22:15:45.500Z'),
       });
 
-      const found = await templates.findById(created.todoId);
+      const found = await templates.findById(userId, created.todoId);
 
-      expect(found?.activeFrom?.toISOString()).toBe('2026-08-01T00:00:00.000Z');
+      expect(found?.activeFrom?.toISOString()).toBe('2026-08-01T10:30:00.000Z');
       expect(found?.activeUntil?.toISOString()).toBe(
-        '2026-08-31T00:00:00.000Z',
+        '2026-08-31T22:15:45.500Z',
       );
     });
 
@@ -125,9 +143,9 @@ describe('Todos Repository (e2e)', () => {
         completeType: 'ONCE',
       });
 
-      await templates.softDelete(created.todoId);
+      await templates.softDelete(userId, created.todoId);
 
-      expect(await templates.findById(created.todoId)).toBeNull();
+      expect(await templates.findById(userId, created.todoId)).toBeNull();
     });
 
     it('금지된 필드를 넣으면 컴파일 단계에서 막힌다', () => {
@@ -136,7 +154,7 @@ describe('Todos Repository (e2e)', () => {
       //
       // `@ts-expect-error`는 "바로 다음 줄에 타입 오류가 있을 것"이라고 선언하는
       // 주석이다. 오류가 **없으면** TypeScript가 거꾸로 "쓸데없는 지시자다"라며
-      // `Unused '@ts-expect-error' directive` 오류를 낸다. 즉 아래 네 줄은 각각
+      // `Unused '@ts-expect-error' directive` 오류를 낸다. 즉 아래 여섯 줄은 각각
       // "이 코드는 타입 오류여야 한다"는 뜻이고, 누군가 금지를 풀면 그 순간
       // `npm run verify`가 깨진다.
       //
@@ -147,9 +165,9 @@ describe('Todos Repository (e2e)', () => {
         // 바꿀 수 없다. 이유는 각 Repository 타입 정의의 주석에 있다.
 
         // @ts-expect-error todoType은 생성 후 수정할 수 없다
-        await templates.update(1n, { todoType: 'NUMERIC' });
+        await templates.update(userId, 1n, { todoType: 'NUMERIC' });
         // @ts-expect-error completeType은 생성 후 수정할 수 없다
-        await templates.update(1n, { completeType: 'ONCE' });
+        await templates.update(userId, 1n, { completeType: 'ONCE' });
 
         // 아래 둘은 이번 변경으로 새로 금지된 것이다.
 
@@ -177,6 +195,22 @@ describe('Todos Repository (e2e)', () => {
           },
           {},
         );
+
+        // 아래 둘은 완료 기록으로 이어지는 **중첩 관계 경로**다. 정의를 다루는
+        // 두 메서드의 입력에 이 필드가 남아 있으면 기록의 저장 통로
+        // (`upsertForHistoriedOn`)와 개별 삭제 금지가 통째로 우회된다 — 갱신
+        // 쪽 중첩 입력에는 행을 실제로 지우는 `deleteMany`가 들어 있어서,
+        // 지울 수 없어야 하는 기록이 삭제 표시도 남기지 않고 사라진다.
+        await templates.create({
+          userId,
+          title: '기록을 함께 만드는 todo',
+          todoType: 'GENERAL',
+          completeType: 'DAILY',
+          // @ts-expect-error 완료 기록은 정의를 만드는 경로로 함께 만들 수 없다
+          histories: { create: [] },
+        });
+        // @ts-expect-error 완료 기록은 정의를 고치는 경로로 지울 수 없다
+        await templates.update(userId, 1n, { histories: { deleteMany: {} } });
       };
 
       expect(typeGuard).toBeInstanceOf(Function);
@@ -191,12 +225,14 @@ describe('Todos Repository (e2e)', () => {
         todoType: 'GENERAL',
         completeType: 'ONCE',
       });
-      const deleted = await templates.softDelete(created.todoId);
+      const deleted = await templates.softDelete(userId, created.todoId);
 
       await expect(
-        templates.update(created.todoId, { title: '되면 안 된다' }),
+        templates.update(userId, created.todoId, { title: '되면 안 된다' }),
       ).rejects.toThrow();
-      await expect(templates.softDelete(created.todoId)).rejects.toThrow();
+      await expect(
+        templates.softDelete(userId, created.todoId),
+      ).rejects.toThrow();
 
       // 최초 삭제 시각이 그대로 남아 있다.
       const row = await prisma.todoTemplate.findUnique({
@@ -215,7 +251,7 @@ describe('Todos Repository (e2e)', () => {
         completeType: 'ONCE',
       });
 
-      const updated = await templates.update(created.todoId, {
+      const updated = await templates.update(userId, created.todoId, {
         title: '바꾼 뒤',
       });
 
@@ -223,6 +259,161 @@ describe('Todos Repository (e2e)', () => {
       expect(updated.updatedAt.getTime()).toBeGreaterThanOrEqual(
         created.updatedAt.getTime(),
       );
+    });
+  });
+
+  describe('소유자 경계 — 남의 할 일에는 닿지 못한다', () => {
+    // 소유자 검사를 위 계층의 "조회한 뒤 비교"에 맡기지 않고 **쿼리 조건**으로 내렸다.
+    // 비교를 빠뜨린 경로가 하나 생기면 그곳으로 남의 데이터가 전부 새는데, 조건이
+    // 인자로 들어가 있으면 빠뜨리는 것 자체가 컴파일되지 않는다.
+    async function createOthersTemplate(title: string) {
+      return templates.create({
+        userId: otherUserId,
+        title,
+        todoType: 'GENERAL',
+        completeType: 'ONCE',
+      });
+    }
+
+    it('남의 할 일은 findById에서 null이다', async () => {
+      // "없다"와 같게 다룬다. 권한 없음으로 구분해 알려 주면 번호를 훑어서 남이
+      // 어떤 할 일을 가졌는지 세어 볼 수 있다.
+      const others = await createOthersTemplate('남의 할 일');
+
+      expect(await templates.findById(userId, others.todoId)).toBeNull();
+      // 주인 본인에게는 보인다 — 조건이 과하게 걸려 아무도 못 읽는 것이 아니다.
+      expect(
+        (await templates.findById(otherUserId, others.todoId))?.todoId,
+      ).toBe(others.todoId);
+    });
+
+    it('남의 할 일은 수정할 수 없다', async () => {
+      const others = await createOthersTemplate('남의 할 일 수정');
+
+      await expect(
+        templates.update(userId, others.todoId, { title: '가로챈 제목' }),
+      ).rejects.toThrow();
+
+      // 제목이 그대로 남아 있다. 거절만 확인하면 "던지면서 이미 고쳐진" 경우를
+      // 놓친다.
+      const row = await prisma.todoTemplate.findUnique({
+        where: { todoId: others.todoId },
+      });
+      expect(row?.title).toBe('남의 할 일 수정');
+    });
+
+    it('남의 할 일은 삭제할 수 없다', async () => {
+      const others = await createOthersTemplate('남의 할 일 삭제');
+
+      await expect(
+        templates.softDelete(userId, others.todoId),
+      ).rejects.toThrow();
+
+      const row = await prisma.todoTemplate.findUnique({
+        where: { todoId: others.todoId },
+      });
+      expect(row?.deletedAt).toBeNull();
+    });
+
+    it('남의 할 일을 삭제 시도해도 그 기록이 지워지지 않는다', async () => {
+      // 삭제는 두 테이블을 한 트랜잭션에서 바꾼다. 이 테스트가 고정하는 것은 **결과**다 —
+      // 거절된 삭제 시도가 남의 기록에 흔적을 남기지 않는다.
+      //
+      // **`softDelete`의 기록 쪽 소유자 조건은 이 테스트가 고정하지 못한다.** 그 조건을
+      // 빼고 돌려 확인했고 그대로 통과했다. 트랜잭션의 첫 연산인 정의 쪽 수정이
+      // `P2025`(고칠 행을 찾지 못했다)로 실패해 통째로 되돌아가므로, 기록 쪽 조건이
+      // 있든 없든 기록에 손이 닿지 않기 때문이다.
+      //
+      // 그 조건만 검증하는 테스트를 만들지 않았다. 실패하게 만들려면 트랜잭션을 벗기고
+      // 기록 쪽을 먼저 실행하도록 **구현 내부 구조를 조작해야** 하고, 그것은 동작이
+      // 아니라 구현 방식을 검사하는 것이다(`.claude/rules/testing.md`). 그 조건을 남겨
+      // 두는 이유는 `todo-templates.repository.ts`의 `softDelete` 주석에 있다.
+      const others = await templates.create({
+        userId: otherUserId,
+        title: '남의 기록이 붙은 할 일',
+        todoType: 'GENERAL',
+        completeType: 'DAILY',
+      });
+      const history = await histories.upsertForHistoriedOn(
+        {
+          todoId: others.todoId,
+          userId: otherUserId,
+          historiedOn: parseLocalDateKey('2026-09-01'),
+          targetValue: null,
+          targetUnit: null,
+        },
+        { progressValue: '10' },
+      );
+
+      await expect(
+        templates.softDelete(userId, others.todoId),
+      ).rejects.toThrow();
+
+      const row = await prisma.todoHistory.findUnique({
+        where: { todoHistoryId: history.todoHistoryId },
+      });
+      expect(row?.deletedAt).toBeNull();
+    });
+
+    it('남의 할 일에 기록을 남기려 하면 없는 할 일로 거절한다', async () => {
+      // **어떤 오류가 나는지가 이 테스트의 핵심이다.** 소유자 조건이 없어도 저장은
+      // 막힌다 — 복합 외래키가 `P2003`(참조 대상이 없다)으로 거절한다. 그러나 그
+      // 오류는 원인을 알기 어렵고, 로그를 보는 사람이 제약 이름부터 되짚어야 한다.
+      // 확인 조회에서 소유자를 함께 보면 그 자리에서 "그런 할 일이 없다"로 끝난다.
+      //
+      // 그래서 `rejects.toThrow()`만 단정하면 고치기 전에도 통과한다.
+      const others = await createOthersTemplate('남의 할 일에 기록');
+
+      await expect(
+        histories.upsertForHistoriedOn(
+          {
+            todoId: others.todoId,
+            userId,
+            historiedOn: parseLocalDateKey('2026-09-02'),
+            targetValue: null,
+            targetUnit: null,
+          },
+          { progressValue: '1' },
+        ),
+      ).rejects.toThrow(TodoTemplateNotFoundError);
+    });
+
+    it('남의 기록은 단건 조회에서 null이다', async () => {
+      const others = await templates.create({
+        userId: otherUserId,
+        title: '남의 기록 단건 조회',
+        todoType: 'GENERAL',
+        completeType: 'DAILY',
+      });
+      const historiedOn = parseLocalDateKey('2026-09-03');
+      await histories.upsertForHistoriedOn(
+        {
+          todoId: others.todoId,
+          userId: otherUserId,
+          historiedOn,
+          targetValue: null,
+          targetUnit: null,
+        },
+        { completedAt: new Date('2026-09-03T05:00:00.000Z') },
+      );
+
+      expect(
+        await histories.findByTodoIdAndHistoriedOn(
+          userId,
+          others.todoId,
+          historiedOn,
+        ),
+      ).toBeNull();
+      // 주인에게는 보인다.
+      expect(
+        (
+          await histories.findByTodoIdAndHistoriedOn(
+            otherUserId,
+            others.todoId,
+            historiedOn,
+          )
+        )?.completedAt,
+      ).not.toBeNull();
     });
   });
 
@@ -355,23 +546,78 @@ describe('Todos Repository (e2e)', () => {
         ),
       ).not.toContain(template.todoId);
     });
+
+    it('진행값만 입력한 할 일은 그 기록을 함께 달고 나온다', async () => {
+      // 목록이 진행률을 그려야 하므로 정의만으로는 부족하다. 기록을 따로 조회하면
+      // 목록 길이만큼 쿼리가 늘고(N+1), 어느 기록이 어느 할 일 것인지 맞추는 코드가
+      // 부르는 쪽에 생긴다.
+      const template = await templates.create({
+        userId,
+        title: '기록이 붙어 올 ONCE',
+        todoType: 'NUMERIC',
+        completeType: 'ONCE',
+        targetValue: '100',
+        targetUnit: '회',
+      });
+      await histories.upsertForHistoriedOn(
+        {
+          todoId: template.todoId,
+          userId: template.userId,
+          historiedOn: toHistoriedOn({
+            completeType: template.completeType,
+            createdAt: template.createdAt,
+            performedAt: new Date('2026-08-01T02:00:00.000Z'),
+            timeZone,
+          }),
+          targetValue: template.targetValue,
+          targetUnit: template.targetUnit,
+        },
+        { progressValue: '30' },
+      );
+
+      const rows = await templates.findOnceWithoutCompletedHistory(userId);
+      const row = rows.find((item) => item.todoId === template.todoId);
+
+      expect(row?.histories).toHaveLength(1);
+      expect(row?.histories[0]?.progressValue?.toString()).toBe('30');
+    });
+
+    it('손대지 않은 할 일은 빈 기록 배열을 달고 나온다', async () => {
+      // 배열이 비어 있는 것이 "아직 손대지 않았다"는 뜻이다. `undefined`가 아니라
+      // 빈 배열이어야 한다 — 부르는 쪽이 첫 항목을 꺼내 상태로 바꾸기 때문이다.
+      const template = await templates.create({
+        userId,
+        title: '손대지 않은 ONCE',
+        todoType: 'GENERAL',
+        completeType: 'ONCE',
+      });
+
+      const rows = await templates.findOnceWithoutCompletedHistory(userId);
+      const row = rows.find((item) => item.todoId === template.todoId);
+
+      expect(row?.histories).toEqual([]);
+    });
   });
 
   describe('DAILY 목록 — 어제 것이 오늘로 밀려오지 않는다', () => {
+    // 활성 판정은 **요청 순간**과 활성 기간을 그대로 비교한다(사용자 확정 — 서버가
+    // 시간 처리를 하지 않는다). 붙여 줄 기록은 여전히 유저 타임존 기준 날짜로 찾는다.
     const yesterday = parseLocalDateKey('2026-08-01');
     const today = parseLocalDateKey('2026-08-02');
+    /** 판정 기준 순간. 요청이 도착한 시각을 흉내 낸다 — `today`에 해당하는 낮이다 */
+    const at = new Date('2026-08-02T05:00:00.000Z');
 
-    it('활성 기간 안이면 그날 히스토리가 없어도 목록에 나온다', async () => {
+    it('요청 순간이 활성 기간 안이면 그날 히스토리가 없어도 목록에 나온다', async () => {
       const template = await templates.create({
         userId,
         title: '활성 DAILY',
         todoType: 'GENERAL',
         completeType: 'DAILY',
-        activeFrom: parseLocalDateKey('2026-07-01'),
-        activeUntil: parseLocalDateKey('2026-12-31'),
+        activeFrom: new Date('2026-07-01T00:00:00.000Z'),
+        activeUntil: new Date('2026-12-31T23:59:59.999Z'),
       });
 
-      const rows = await templates.findDailyActiveOn(userId, today);
+      const rows = await templates.findDailyActiveAt(userId, at, today);
 
       const row = rows.find((item) => item.todoId === template.todoId);
       expect(row).toBeDefined();
@@ -379,44 +625,67 @@ describe('Todos Repository (e2e)', () => {
       expect(row?.histories).toEqual([]);
     });
 
-    it('activeFrom과 같은 날은 포함된다 (양 끝 포함)', async () => {
-      // `lte`/`gte`를 `lt`/`gt`로 바꾸는 수정이 통과하지 않게 경계를 고정한다.
+    it('요청 순간이 activeFrom 직전이면 빠지고 그 순간부터 나온다', async () => {
+      // 반열림 구간에서 포함되는 쪽 경계다. `lte`를 `lt`로 바꾸는 수정이 통과하지
+      // 않게 경계를 순간 단위로 고정한다 — 컬럼이 `timestamptz(3)`라 1밀리초가
+      // 판별 가능한 최소 간격이다.
+      const activeFrom = new Date('2026-08-02T10:30:00.000Z');
       const template = await templates.create({
         userId,
-        title: '시작일 경계',
+        title: '시작 순간 경계',
         todoType: 'GENERAL',
         completeType: 'DAILY',
-        activeFrom: today,
+        activeFrom,
       });
 
-      const onStart = await templates.findDailyActiveOn(userId, today);
-      const dayBefore = await templates.findDailyActiveOn(userId, yesterday);
+      const atStart = await templates.findDailyActiveAt(
+        userId,
+        activeFrom,
+        today,
+      );
+      const justBefore = await templates.findDailyActiveAt(
+        userId,
+        new Date(activeFrom.getTime() - 1),
+        today,
+      );
 
-      expect(onStart.map((item) => item.todoId)).toContain(template.todoId);
-      // 시작일 전날은 빠진다.
-      expect(dayBefore.map((item) => item.todoId)).not.toContain(
+      expect(atStart.map((item) => item.todoId)).toContain(template.todoId);
+      // 시작 직전 순간에는 빠진다.
+      expect(justBefore.map((item) => item.todoId)).not.toContain(
         template.todoId,
       );
     });
 
-    it('activeUntil과 같은 날은 포함되고 다음 날은 빠진다', async () => {
-      const dayAfter = parseLocalDateKey('2026-08-03');
+    it('activeUntil과 같은 순간에는 빠지고 직전 순간에는 나온다 (반열림)', async () => {
+      // 활성 판정은 반열림 구간이다 — `activeFrom <= 순간 < activeUntil`(사용자
+      // 최종 확정). 상한 순간 자체는 포함되지 않는다. `gt`를 `gte`로 되돌리는
+      // 수정이 통과하지 않게 경계 양쪽을 함께 고정한다 — 컬럼이 `timestamptz(3)`라
+      // 1밀리초가 판별 가능한 최소 간격이다.
+      const activeUntil = new Date('2026-08-02T18:45:00.000Z');
       const template = await templates.create({
         userId,
-        title: '종료일 경계',
+        title: '반열림 상한 경계',
         todoType: 'GENERAL',
         completeType: 'DAILY',
-        activeFrom: yesterday,
-        activeUntil: today,
+        activeFrom: new Date('2026-08-01T00:00:00.000Z'),
+        activeUntil,
       });
 
-      const onEnd = await templates.findDailyActiveOn(userId, today);
-      const afterEnd = await templates.findDailyActiveOn(userId, dayAfter);
+      const atBoundary = await templates.findDailyActiveAt(
+        userId,
+        activeUntil,
+        today,
+      );
+      const justBefore = await templates.findDailyActiveAt(
+        userId,
+        new Date(activeUntil.getTime() - 1),
+        today,
+      );
 
-      expect(onEnd.map((item) => item.todoId)).toContain(template.todoId);
-      expect(afterEnd.map((item) => item.todoId)).not.toContain(
+      expect(atBoundary.map((item) => item.todoId)).not.toContain(
         template.todoId,
       );
+      expect(justBefore.map((item) => item.todoId)).toContain(template.todoId);
     });
 
     it('activeFrom이 null이면 시작 제한 없이 나온다', async () => {
@@ -427,10 +696,10 @@ describe('Todos Repository (e2e)', () => {
         title: '시작 제한 없는 DAILY',
         todoType: 'GENERAL',
         completeType: 'DAILY',
-        activeUntil: parseLocalDateKey('2026-12-31'),
+        activeUntil: new Date('2026-12-31T23:59:59.999Z'),
       });
 
-      const rows = await templates.findDailyActiveOn(userId, today);
+      const rows = await templates.findDailyActiveAt(userId, at, today);
 
       expect(rows.map((item) => item.todoId)).toContain(template.todoId);
     });
@@ -441,11 +710,11 @@ describe('Todos Repository (e2e)', () => {
         title: '기간 끝난 DAILY',
         todoType: 'GENERAL',
         completeType: 'DAILY',
-        activeFrom: parseLocalDateKey('2026-07-01'),
-        activeUntil: parseLocalDateKey('2026-07-31'),
+        activeFrom: new Date('2026-07-01T00:00:00.000Z'),
+        activeUntil: new Date('2026-07-31T23:59:59.999Z'),
       });
 
-      const rows = await templates.findDailyActiveOn(userId, today);
+      const rows = await templates.findDailyActiveAt(userId, at, today);
 
       expect(rows.map((item) => item.todoId)).not.toContain(template.todoId);
     });
@@ -456,23 +725,24 @@ describe('Todos Repository (e2e)', () => {
         title: '무기한 DAILY',
         todoType: 'GENERAL',
         completeType: 'DAILY',
-        activeFrom: parseLocalDateKey('2026-07-01'),
+        activeFrom: new Date('2026-07-01T00:00:00.000Z'),
       });
 
-      const rows = await templates.findDailyActiveOn(userId, today);
+      const rows = await templates.findDailyActiveAt(userId, at, today);
 
       expect(rows.map((item) => item.todoId)).toContain(template.todoId);
     });
 
     it('어제 완료해도 오늘은 히스토리 없이 다시 나온다', async () => {
       // 확정된 요구사항의 핵심이다 — 어제 것이 오늘로 밀려오지 않고, 어제는
-      // 어제 상태로 남는다.
+      // 어제 상태로 남는다. 판정 순간은 같은 활성 기간 안에 있으므로 두 조회의
+      // 차이는 **어느 날짜의 기록을 붙이는가**뿐이다.
       const template = await templates.create({
         userId,
         title: '어제 완료한 DAILY',
         todoType: 'GENERAL',
         completeType: 'DAILY',
-        activeFrom: parseLocalDateKey('2026-07-01'),
+        activeFrom: new Date('2026-07-01T00:00:00.000Z'),
       });
       const snapshot = {
         todoId: template.todoId,
@@ -485,11 +755,12 @@ describe('Todos Repository (e2e)', () => {
         completedAt: new Date('2026-08-01T10:00:00.000Z'),
       });
 
-      const yesterdayRows = await templates.findDailyActiveOn(
+      const yesterdayRows = await templates.findDailyActiveAt(
         userId,
+        new Date('2026-08-01T10:00:00.000Z'),
         yesterday,
       );
-      const todayRows = await templates.findDailyActiveOn(userId, today);
+      const todayRows = await templates.findDailyActiveAt(userId, at, today);
 
       // 어제는 완료 기록이 붙어 있다.
       expect(
@@ -542,6 +813,7 @@ describe('Todos Repository (e2e)', () => {
         progressValue: '40',
       });
       const found = await histories.findByTodoIdAndHistoriedOn(
+        userId,
         template.todoId,
         historiedOn,
       );
@@ -651,7 +923,7 @@ describe('Todos Repository (e2e)', () => {
       const snapshot = snapshotOf(template, historiedOn);
 
       const created = await histories.upsertForHistoriedOn(snapshot, {});
-      await templates.softDelete(template.todoId);
+      await templates.softDelete(userId, template.todoId);
 
       await expect(
         histories.upsertForHistoriedOn(snapshot, { progressValue: '5' }),
@@ -686,7 +958,7 @@ describe('Todos Repository (e2e)', () => {
       // 검사 대상이 "그 날짜의 지워진 기록"이 아니라 **할 일 자체의 삭제 여부**다.
       // 기록이 아예 없던 날짜에도 지워진 할 일이면 새로 만들 수 없다.
       const template = await createDailyTemplate('기록 없이 지워진 할 일');
-      await templates.softDelete(template.todoId);
+      await templates.softDelete(userId, template.todoId);
 
       await expect(
         histories.upsertForHistoriedOn(
@@ -709,7 +981,7 @@ describe('Todos Repository (e2e)', () => {
         { progressValue: '20' },
       );
 
-      await templates.softDelete(template.todoId);
+      await templates.softDelete(userId, template.todoId);
 
       const rows = await prisma.todoHistory.findMany({
         where: {
@@ -731,7 +1003,7 @@ describe('Todos Repository (e2e)', () => {
 
       await histories.upsertForHistoriedOn(snapshotOf(alive, historiedOn), {});
       await histories.upsertForHistoriedOn(snapshotOf(doomed, historiedOn), {});
-      await templates.softDelete(doomed.todoId);
+      await templates.softDelete(userId, doomed.todoId);
 
       const rows = await histories.findDailyHistoriesOn(userId, historiedOn);
 
@@ -748,6 +1020,7 @@ describe('Todos Repository (e2e)', () => {
         {},
       );
       const found = await histories.findByTodoIdAndHistoriedOn(
+        userId,
         template.todoId,
         historiedOn,
       );
@@ -785,10 +1058,11 @@ describe('Todos Repository (e2e)', () => {
         snapshotOf(template, historiedOn),
         {},
       );
-      await templates.softDelete(template.todoId);
+      await templates.softDelete(userId, template.todoId);
 
       expect(
         await histories.findByTodoIdAndHistoriedOn(
+          userId,
           template.todoId,
           historiedOn,
         ),
@@ -796,41 +1070,415 @@ describe('Todos Repository (e2e)', () => {
     });
   });
 
-  describe('복합 FK — 소유자 위조를 DB가 막는다', () => {
-    it('남의 todoId에 자기 userId를 붙인 히스토리는 거절된다', async () => {
+  describe('기간 범위 기록 조회 — 상세 화면의 이력', () => {
+    // 매일 반복 할 일의 상세는 날짜별 이력을 보여 준다. 범위를 인자로 받는 이유는
+    // 전체를 돌려주면 오래 쓴 할 일에서 결과가 무한히 커지기 때문이다.
+    async function createRangeTemplate(owner: bigint, title: string) {
+      return templates.create({
+        userId: owner,
+        title,
+        todoType: 'NUMERIC',
+        completeType: 'DAILY',
+        targetValue: '100',
+        targetUnit: '회',
+      });
+    }
+
+    async function record(
+      template: { todoId: bigint; userId: bigint },
+      dateKey: string,
+      progressValue: string,
+    ) {
+      return histories.upsertForHistoriedOn(
+        {
+          todoId: template.todoId,
+          userId: template.userId,
+          historiedOn: parseLocalDateKey(dateKey),
+          targetValue: '100',
+          targetUnit: '회',
+        },
+        { progressValue },
+      );
+    }
+
+    it('양 끝 날짜를 포함하고 범위 밖은 빼낸다', async () => {
+      // `gte`/`lte`를 `gt`/`lt`로 바꾸는 수정이 통과하지 않게 경계를 고정한다.
+      // 사용자가 고른 날짜는 양쪽을 포함한다. (활성 기간은 순간 컬럼이 되면서
+      // 반열림으로 갔지만, 이쪽은 날짜 알갱이 그대로라 그 이유가 적용되지 않는다 —
+      // 날짜에는 "그날의 끝"이 필요 없다.)
+      const template = await createRangeTemplate(userId, '범위 경계');
+      await record(template, '2026-10-04', '10');
+      await record(template, '2026-10-05', '20');
+      await record(template, '2026-10-07', '30');
+      await record(template, '2026-10-10', '40');
+      await record(template, '2026-10-11', '50');
+
+      const rows = await histories.findByTodoIdBetween(
+        userId,
+        template.todoId,
+        parseLocalDateKey('2026-10-05'),
+        parseLocalDateKey('2026-10-10'),
+      );
+
+      expect(
+        rows.map((row) => row.historiedOn.toISOString().slice(0, 10)),
+      ).toEqual(['2026-10-05', '2026-10-07', '2026-10-10']);
+    });
+
+    it('날짜 오름차순으로 돌려준다', async () => {
+      // 화면이 시간 순서로 그린다. 넣은 순서를 뒤섞어 두고 정렬이 실제로 걸리는지
+      // 본다 — 저장 순서대로 나오면 이 단정이 깨진다.
+      const template = await createRangeTemplate(userId, '정렬 확인');
+      await record(template, '2026-11-03', '30');
+      await record(template, '2026-11-01', '10');
+      await record(template, '2026-11-02', '20');
+
+      const rows = await histories.findByTodoIdBetween(
+        userId,
+        template.todoId,
+        parseLocalDateKey('2026-11-01'),
+        parseLocalDateKey('2026-11-03'),
+      );
+
+      expect(rows.map((row) => row.progressValue?.toString())).toEqual([
+        '10',
+        '20',
+        '30',
+      ]);
+    });
+
+    it('남의 할 일 기록은 빼낸다', async () => {
+      const others = await createRangeTemplate(otherUserId, '남의 이력');
+      await record(others, '2026-12-01', '10');
+
+      const rows = await histories.findByTodoIdBetween(
+        userId,
+        others.todoId,
+        parseLocalDateKey('2026-12-01'),
+        parseLocalDateKey('2026-12-31'),
+      );
+
+      expect(rows).toEqual([]);
+      // 주인에게는 보인다 — 조건이 과하게 걸려 아무도 못 읽는 것이 아니다.
+      expect(
+        await histories.findByTodoIdBetween(
+          otherUserId,
+          others.todoId,
+          parseLocalDateKey('2026-12-01'),
+          parseLocalDateKey('2026-12-31'),
+        ),
+      ).toHaveLength(1);
+    });
+
+    it('지워진 할 일의 기록은 빼낸다', async () => {
+      const template = await createRangeTemplate(userId, '지울 이력');
+      await record(template, '2027-01-05', '10');
+      await templates.softDelete(userId, template.todoId);
+
+      expect(
+        await histories.findByTodoIdBetween(
+          userId,
+          template.todoId,
+          parseLocalDateKey('2027-01-01'),
+          parseLocalDateKey('2027-01-31'),
+        ),
+      ).toEqual([]);
+    });
+
+    it('범위 안에 기록이 없으면 빈 배열이다', async () => {
+      const template = await createRangeTemplate(userId, '기록 없는 범위');
+      await record(template, '2027-02-01', '10');
+
+      expect(
+        await histories.findByTodoIdBetween(
+          userId,
+          template.todoId,
+          parseLocalDateKey('2027-03-01'),
+          parseLocalDateKey('2027-03-31'),
+        ),
+      ).toEqual([]);
+    });
+  });
+
+  describe('상세 조회의 이력 범위 — 순간을 유저 타임존 날짜로 자른다', () => {
+    it('자정 아닌 범위 순간이 유저 타임존에서 속한 날짜의 기록을 포함한다', async () => {
+      // 이력 범위는 순간으로 받고, Service가 유저 타임존(여기서는 서울)을 읽어
+      // 그 순간이 속한 날짜로 자른 뒤 날짜 키 비교(양 끝 포함)에 넘긴다.
+      // `2026-08-01T20:00:00Z`는 서울에서 8월 2일 05:00이므로 8월 2일 기록까지
+      // 포함되어야 한다 — 순간을 UTC 날짜로 자르면(8월 1일) 이 기록이 빠진다.
+      const service = app.get(TodosService);
+      const template = await templates.create({
+        userId,
+        title: '이력 범위 순간화',
+        todoType: 'NUMERIC',
+        completeType: 'DAILY',
+        targetValue: '100',
+        targetUnit: '회',
+      });
+      await histories.upsertForHistoriedOn(
+        {
+          todoId: template.todoId,
+          userId: template.userId,
+          historiedOn: parseLocalDateKey('2026-08-02'),
+          targetValue: '100',
+          targetUnit: '회',
+        },
+        { progressValue: '10' },
+      );
+
+      const detail = await service.getTodo(userId, template.todoId, {
+        // 서울 기준 8월 1일 05:00 — 유저 타임존 날짜로 8월 1일이다.
+        from: new Date('2026-07-31T20:00:00.000Z'),
+        // 서울 기준 8월 2일 05:00 — 유저 타임존 날짜로 8월 2일이다.
+        until: new Date('2026-08-01T20:00:00.000Z'),
+      });
+
+      expect(detail.completeType).toBe('DAILY');
+      const items = detail.completeType === 'DAILY' ? detail.histories : [];
+      expect(items.map((item) => item.historiedOn)).toContain('2026-08-02');
+    });
+  });
+
+  describe('병합 목록 — 마감 순간 오름차순 (listTodosOn)', () => {
+    // 이 파일의 다른 테스트들이 공유 유저(`userId`)에 할 일을 계속 만들어 두므로,
+    // **목록 전체의 순서**를 단정하려면 전용 유저가 필요하다.
+    let mergedUserId: bigint;
+
+    beforeAll(async () => {
+      const user = await prisma.appUser.create({
+        data: { email: uniqueEmail('todos-e2e-merged'), timeZone },
+      });
+      mergedUserId = user.userId;
+    });
+
+    afterAll(async () => {
+      // cascade로 template·history가 함께 지워진다.
+      await prisma.appUser.deleteMany({ where: { userId: mergedUserId } });
+    });
+
+    it('연체 일회성 < 매일 반복 < 미래 일회성 < 예정일 없는 일회성(만든 순)으로 나온다', async () => {
+      // 사용자 요구 문장("완료일이 가까운 순") 그대로의 관찰이다. 기준 순간은
+      // 서울 8월 2일 14:00 — 매일 반복의 마감은 유저 타임존(서울)에서 다음 달력
+      // 날짜(8월 3일)가 시작되는 최초의 순간 = 2026-08-02T15:00:00Z다.
+      const service = app.get(TodosService);
+      const at = new Date('2026-08-02T05:00:00.000Z');
+
+      // **마감 순서와 다르게 만든다** — 만든 순이 그대로 나오면 통과하지 않게
+      // 하려는 것이다. 예정일 없는 둘만 "만든 순" 단정을 위해 순서대로 만든다.
+      const futureOnce = await templates.create({
+        userId: mergedUserId,
+        title: '미래 예정일 일회성',
+        todoType: 'GENERAL',
+        completeType: 'ONCE',
+        // 매일 반복의 마감(2026-08-02T15:00:00Z)보다 뒤다.
+        shouldDoAt: new Date('2026-09-01T09:00:00.000Z'),
+      });
+      const noDueFirst = await templates.create({
+        userId: mergedUserId,
+        title: '예정일 없는 일회성 (먼저 만든 것)',
+        todoType: 'GENERAL',
+        completeType: 'ONCE',
+      });
+      const daily = await templates.create({
+        userId: mergedUserId,
+        title: '활성 매일 반복',
+        todoType: 'GENERAL',
+        completeType: 'DAILY',
+        activeFrom: new Date('2026-07-01T00:00:00.000Z'),
+      });
+      const overdueOnce = await templates.create({
+        userId: mergedUserId,
+        title: '연체된 일회성',
+        todoType: 'GENERAL',
+        completeType: 'ONCE',
+        // 기준 순간보다 한참 앞이다 — 지났어도 완료 전에는 목록에 남는다.
+        shouldDoAt: new Date('2026-07-20T09:00:00.000Z'),
+      });
+      const noDueSecond = await templates.create({
+        userId: mergedUserId,
+        title: '예정일 없는 일회성 (나중에 만든 것)',
+        todoType: 'GENERAL',
+        completeType: 'ONCE',
+      });
+
+      const items = await service.listTodosOn(mergedUserId, at);
+
+      expect(items.map((item) => item.todoId)).toEqual([
+        overdueOnce.todoId,
+        daily.todoId,
+        futureOnce.todoId,
+        noDueFirst.todoId,
+        noDueSecond.todoId,
+      ]);
+      // 목록 항목이 정의의 생성 시각을 내보낸다 — 병합 목록의 2차 정렬키로 열어 둔
+      // 필드다(사용자 확정). 같은 픽스처를 다시 만들지 않으려고 순서 단정과 한
+      // 테스트에 둔다.
+      expect(items[0]?.createdAt).toEqual(overdueOnce.createdAt);
+    });
+  });
+
+  describe('복합 외래키 — 소유자 위조를 DB가 막는다', () => {
+    it('남의 todoId에 자기 userId를 붙인 기록은 삽입 자체가 거절된다', async () => {
       // 라운드 1에서 `db execute`로 실측한 것을 테스트로 고정한다. 이 제약이
-      // 사라지면 남의 todo 스냅샷이 내 목록에 섞이고 원래 소유자의 조회에서는
+      // 사라지면 남의 할 일 스냅샷이 내 목록에 섞이고 원래 소유자의 조회에서는
       // 그 날짜 기록이 사라진다.
-      const attacker = await prisma.appUser.create({
+      //
+      // **Repository를 거치지 않고 `prisma`로 직접 삽입한다.** 이제 저장 경로가 확인
+      // 조회에서 소유자를 함께 보므로, Repository를 통하면 `TodoTemplateNotFoundError`로
+      // 먼저 막혀 **DB 제약까지 도달하지 않는다.** 그 상태로 두면 이 테스트가 통과하면서
+      // 정작 검증 대상인 제약은 아무것도 지키지 못한다 — 두 겹 중 바깥쪽만 확인하는
+      // 셈이다. 안쪽 겹(DB 제약)은 여기서, 바깥쪽 겹(Repository 거절)은 위
+      // "소유자 경계" 절에서 각각 고정한다.
+      const victimTemplate = await templates.create({
+        userId: otherUserId,
+        title: '피해자의 할 일',
+        todoType: 'GENERAL',
+        completeType: 'DAILY',
+      });
+
+      await expect(
+        prisma.todoHistory.create({
+          data: {
+            todoId: victimTemplate.todoId,
+            // 소유자가 어긋난다. 할 일은 `otherUserId`의 것이다.
+            userId,
+            historiedOn: parseLocalDateKey('2026-08-20'),
+          },
+        }),
+        // 제약 이름까지 확인한다. 다른 이유로 실패해도 통과하는 것을 막는다.
+      ).rejects.toThrow('todo_history_todo_id_user_id_fkey');
+    });
+  });
+
+  describe('활성 기간 CHECK 제약 — 뒤집힌·빈 기간을 DB가 막는다', () => {
+    // `updateTodo`의 읽기→검증→쓰기 사이에 잠금이 없어, 서로 반대쪽 활성 기간
+    // 필드를 고치는 두 요청이 각자의 스냅샷으로 검증을 통과하면 뒤집힌·빈 기간이
+    // 저장될 수 있다. 그 경쟁의 최종 방어가 DB CHECK 제약이고, 이 절이 그것을
+    // 고정한다.
+    //
+    // **Repository·Service를 거치지 않고 `prisma`로 직접 시도한다.** 정상 경로는
+    // `assertShape`가 먼저 400으로 거절해 DB까지 도달하지 않으므로, 그대로 두면
+    // 이 테스트가 통과하면서 정작 검증 대상인 제약은 아무것도 지키지 못한다 —
+    // 위 복합 외래키 절과 같은 이유다.
+    const from = new Date('2026-09-01T00:00:00.000Z');
+    const until = new Date('2026-08-01T00:00:00.000Z'); // from보다 앞 — 뒤집힌 기간
+
+    /**
+     * 거절될 것으로 기대한 시도의 오류 객체를 돌려준다. `rejects.toThrow()`만 쓰면
+     * 오류 종류·코드를 단정할 수 없어(저장소 규약) 잡아서 돌려주는 형태로 만들었다.
+     */
+    async function captureRejection(attempt: Promise<unknown>): Promise<Error> {
+      try {
+        await attempt;
+      } catch (error) {
+        return error as Error;
+      }
+      throw new Error('거절될 것으로 기대한 시도가 성공했다');
+    }
+
+    /**
+     * CHECK 위반의 오류 형태를 단정한다. 드라이버 어댑터(`@prisma/adapter-pg`)가
+     * `23514`(check_violation)를 따로 매핑하지 않아 `PrismaClientKnownRequestError`
+     * 코드 `P2039`(Database error)로 감싸져 올라온다 — 아래 SQLSTATE·제약 이름
+     * 단정이 "다른 이유의 P2039"까지 걸러 낸다.
+     *
+     * **`meta.driverAdapterError.cause`의 구조까지 단정하는 이유**: Service의
+     * 409 변환(`todos.service.ts`)이 그 경로로 SQLSTATE와 제약 이름을 읽는데,
+     * 그쪽 단위 테스트는 이 형태를 흉내 낸 대역을 쓴다 — 실제 오류가 이 형태라는
+     * 사실은 DB에 붙는 여기서만 확인할 수 있다. Prisma가 이 구조를 바꾸면 조용히
+     * 변환이 멈추는 대신 이 테스트가 깨진다. 제약 이름은 구조화된 필드가 없어
+     * 메시지 문자열 안에만 있다(2026-08-08 실측, Prisma 7.9.1).
+     */
+    function expectActivePeriodCheckViolation(error: Error): void {
+      expect(error).toBeInstanceOf(Prisma.PrismaClientKnownRequestError);
+      const known = error as Prisma.PrismaClientKnownRequestError;
+      expect(known.code).toBe('P2039');
+      const cause = (
+        known.meta as {
+          driverAdapterError?: { cause?: { code?: string; message?: string } };
+        }
+      )?.driverAdapterError?.cause;
+      expect(cause?.code).toBe('23514');
+      expect(cause?.message).toContain('todo_template_active_period_check');
+    }
+
+    it('뒤집힌 기간은 직접 삽입해도 거절된다', async () => {
+      const error = await captureRejection(
+        prisma.todoTemplate.create({
+          data: {
+            userId,
+            title: '뒤집힌 활성 기간',
+            todoType: 'GENERAL',
+            completeType: 'DAILY',
+            activeFrom: from,
+            activeUntil: until,
+          },
+        }),
+      );
+
+      expectActivePeriodCheckViolation(error);
+    });
+
+    it('뒤집힌 기간은 직접 갱신해도 거절된다', async () => {
+      // 경쟁 패자가 실제로 지나는 경로가 UPDATE문이다 — 삽입과 갱신은 제약 검사
+      // 시점이 다른 문장이라 각각 고정한다.
+      const created = await prisma.todoTemplate.create({
         data: {
-          email: `attacker-${Date.now()}-${Math.random().toString(36).slice(2)}@example.test`,
+          userId,
+          title: '갱신으로 뒤집기',
+          todoType: 'GENERAL',
+          completeType: 'DAILY',
+          activeFrom: until,
+          activeUntil: from,
         },
       });
 
-      try {
-        const victimTemplate = await templates.create({
+      const error = await captureRejection(
+        prisma.todoTemplate.update({
+          where: { todoId: created.todoId },
+          data: { activeFrom: from, activeUntil: until },
+        }),
+      );
+
+      expectActivePeriodCheckViolation(error);
+    });
+
+    it('두 값이 같은 빈 기간도 거절된다', async () => {
+      // 판정이 반열림 구간(activeFrom <= 순간 < activeUntil)이라 두 값이 같으면
+      // 만족하는 순간이 없다. `assertShape`의 `>=` 거절과 같은 경계다 — 제약이
+      // `<`(등호 없음)이어야 이 경우까지 막는다.
+      const error = await captureRejection(
+        prisma.todoTemplate.create({
+          data: {
+            userId,
+            title: '빈 활성 기간',
+            todoType: 'GENERAL',
+            completeType: 'DAILY',
+            activeFrom: from,
+            activeUntil: from,
+          },
+        }),
+      );
+
+      expectActivePeriodCheckViolation(error);
+    });
+
+    it('한쪽이 NULL이면 저장된다 — 그쪽 제한이 없다는 뜻이다', async () => {
+      // NULL은 무제한이라 비교 대상이 아니다. 제약이 이 경우를 막으면 "기한 없이
+      // 계속되는" 정상 상태가 만들어질 수 없다.
+      const openEnded = await prisma.todoTemplate.create({
+        data: {
           userId,
-          title: '피해자의 todo',
+          title: '상한 없는 활성 기간',
           todoType: 'GENERAL',
           completeType: 'DAILY',
-        });
+          activeFrom: from,
+          activeUntil: null,
+        },
+      });
 
-        await expect(
-          histories.upsertForHistoriedOn(
-            {
-              todoId: victimTemplate.todoId,
-              // 소유자가 어긋난다.
-              userId: attacker.userId,
-              historiedOn: parseLocalDateKey('2026-08-20'),
-              targetValue: null,
-              targetUnit: null,
-            },
-            {},
-          ),
-        ).rejects.toThrow();
-      } finally {
-        await prisma.appUser.delete({ where: { userId: attacker.userId } });
-      }
+      expect(openEnded.activeFrom).toEqual(from);
+      expect(openEnded.activeUntil).toBeNull();
     });
   });
 });

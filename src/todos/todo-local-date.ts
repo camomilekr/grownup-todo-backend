@@ -108,17 +108,76 @@ export function toHistoriedOn({
     : toLocalDateKey(performedAt, timeZone);
 }
 
+/**
+ * 유저 타임존에서 `at`의 **다음 달력 날짜가 시작되는 최초의 순간**을 돌려준다.
+ * 매일 반복 할 일의 마감 순간이 이 값이다 — "오늘까지"의 끝이 곧 다음 날짜의 시작이다.
+ *
+ * **계약을 "다음 자정"으로 두지 않았다.** DST(일광 절약 시간) 전환일에는 자정이
+ * 없거나 두 번 있기 때문이다 — `America/Santiago`의 봄 전환은 시계가 00:00을
+ * 건너뛰어 그날이 01:00에 시작하고, `America/Havana`의 가을 전환은 00:00~01:00이
+ * 두 번 온다. "다음 달력 날짜의 최초 순간"은 두 경우를 모두 흡수한다 — 없으면
+ * 그날의 첫 순간(01:00), 두 번이면 이른 쪽이다.
+ *
+ * **구현은 오프셋 역산이 아니라 `toLocalDateKey` 기준의 이진 탐색이다.** 벽시계
+ * 자정에서 순간을 역산하면 위 두 경우와 비정수 오프셋(`Asia/Kathmandu` +05:45)을
+ * 각각 따로 다뤄야 하는데, "로컬 날짜가 다음 날이 되는 최초 순간"을 직접 찾으면
+ * 정의가 곧 구현이라 그 경우들이 저절로 맞는다. 탐색 폭이 48시간(밀리초 단위)이라
+ * 반복이 28회 남짓이고, 요청당 한 번 부르는 자리라 비용 문제가 없다.
+ *
+ * 반환값은 항상 `at`보다 **엄격히 뒤다.** `at`이 자정 정각이어도 다음 날의 시작을
+ * 돌려준다 — 같은 순간을 돌려주면 마감이 "이미 지난" 것으로 읽힌다.
+ *
+ * @param at 기준 순간 (보통 요청이 도착한 시각)
+ * @param timeZone IANA 타임존 이름. `AppUser.timeZone`이 이 값을 들고 있다
+ * @throws {RangeError} `at`이 유효하지 않거나 `timeZone`이 알 수 없는 이름일 때
+ */
+export function toNextLocalDayStart(at: Date, timeZone: string): Date {
+  // 유효성 검사를 겸한다 — Invalid Date와 알 수 없는 타임존은 여기서 던진다.
+  const currentKey = toLocalDateKey(at, timeZone);
+
+  // 다음 달력 날짜의 키. 날짜 키는 UTC 자정 `Date`라 하루치 밀리초를 더하면 된다 —
+  // 이 덧셈은 키 공간(UTC)의 산술이고, 타임존의 하루 길이(23~25시간)와 무관하다.
+  const targetKeyTime = currentKey.getTime() + MILLISECONDS_PER_DAY;
+
+  // 불변식 — `low`의 로컬 날짜는 아직 오늘이고, `high`의 로컬 날짜는 다음 날
+  // 이상이다. `at`+48시간이면 DST로 한 시간이 되돌아가도 로컬 시계가 47시간은
+  // 나아가므로 날짜가 반드시 넘어가 있다.
+  //
+  // 로컬 날짜는 순간에 대해 단조 증가다(가을 전환도 시계를 자정 너머로 되돌리지는
+  // 않는다 — Havana 실측에서 확인). 그래서 "처음으로 다음 날이 되는 순간"을 이진
+  // 탐색으로 찾을 수 있다.
+  let low = at.getTime();
+  let high = at.getTime() + 2 * MILLISECONDS_PER_DAY;
+
+  while (high - low > 1) {
+    const middle = Math.floor((low + high) / 2);
+
+    // 목표 날짜를 건너뛰는 타임존 변경(달력에서 하루가 통째로 사라진 사례가 실제로
+    // 있다)까지 견디도록 등호가 아니라 `>=`로 비교한다 — 그때의 답은 "그다음으로
+    // 시작되는 날짜의 최초 순간"이다.
+    if (toLocalDateKey(new Date(middle), timeZone).getTime() >= targetKeyTime) {
+      high = middle;
+    } else {
+      low = middle;
+    }
+  }
+
+  return new Date(high);
+}
+
 /** `YYYY-MM-DD` 형식만 받는다. 앞뒤 공백도 허용하지 않는다. */
 const DATE_KEY_PATTERN = /^(\d{4})-(\d{2})-(\d{2})$/;
 
 /**
  * `"2026-08-01"` 같은 날짜 문자열을 `@db.Date` 컬럼에 넣을 UTC 자정 `Date`로 바꾼다.
  *
- * `activeFrom`/`activeUntil`은 **사용자가 고르는 날짜**라 "순간"이 없고
- * `toLocalDateKey`로 만들 수 없다. 그런데 `@db.Date` 컬럼에 넘긴 `Date`는 어댑터가
+ * 이력 조회 범위(`TodoHistoryRange`)처럼 **사용자가 고르는 날짜**는 "순간"이 없어
+ * `toLocalDateKey`로 만들 수 없다. 그런데 `@db.Date` 컬럼과 비교되는 `Date`는 어댑터가
  * UTC 컴포넌트로 직렬화하므로, 손으로 만들면 조용히 하루가 밀린다 — KST에서
- * `new Date(2026, 7, 1).toISOString()`은 `2026-07-31T15:00:00.000Z`이고, 저장되는
- * 값은 `2026-07-31`이다. 어떤 예외도 나지 않아 DAILY todo가 하루 일찍 활성화된다.
+ * `new Date(2026, 7, 1).toISOString()`은 `2026-07-31T15:00:00.000Z`이고, 비교되는
+ * 값은 `2026-07-31`이다. 어떤 예외도 나지 않아 어긋난 기간의 기록이 돌아온다.
+ * (활성 기간은 순간 컬럼이 되면서 이 함수의 용례에서 빠졌다 — 시간 해석은
+ * 클라이언트의 몫이다.)
  *
  * `new Date('2026-08-01')`이 마침 UTC 자정으로 파싱되는 것에 기대지 않는다. 그 동작은
  * 문자열 형식에 따라 갈리고(`'2026-8-1'`은 구현 정의 동작으로 로컬 시각이 된다),
@@ -152,4 +211,77 @@ export function parseLocalDateKey(isoDate: string): Date {
   }
 
   return key;
+}
+
+/** 하루의 밀리초. UTC 자정인지를 나머지 연산으로 판별하는 데 쓴다 */
+const MILLISECONDS_PER_DAY = 86_400_000;
+
+/**
+ * 그 `Date`가 **날짜 컬럼(`@db.Date`)에 넣어도 되는 값인지** 확인한다. 어긋나면 던지고
+ * 맞으면 아무것도 하지 않는다.
+ *
+ * **이 검사가 필요한 이유는 어긋난 값이 조용히 통과하기 때문이다.** 어댑터가 `@db.Date`
+ * 컬럼에 넘길 값을 `getUTCFullYear`/`getUTCMonth`/`getUTCDate`로 직렬화하므로, UTC 자정이
+ * 아닌 `Date`를 넘기면 시각 부분이 잘려 나가면서 날짜가 어긋난다 — 한국 시간대에서
+ * `new Date(2026, 7, 1)`은 `2026-07-31T15:00:00.000Z`이고 비교되는 값은 `2026-07-31`이다.
+ * **예외가 하나도 나지 않아** 이력 조회 범위가 하루 밀린 채 결과가 돌아오고 어떤
+ * 테스트도 잡지 못한다.
+ *
+ * 시각 컬럼(`Timestamptz`)인 `completedAt`·`shouldDoAt`을 실수로 넘기는 경우도 같은
+ * 검사에 걸린다. 그쪽은 UTC 기준 날짜가 나오는데 그 값이 유저 타임존 기준 날짜와
+ * 어긋나서, 한국 시간대 오전에 완료한 기록은 맞아 보이다가 **저녁에 완료한 기록에서만
+ * 하루 어긋난다.**
+ *
+ * **값이 없는 경우도 `RangeError`로 거절한다.** `tsconfig.json`이
+ * `strictNullChecks: false`라 `undefined`를 넘기는 호출을 컴파일러가 막지 못하는데,
+ * 그대로 두면 `undefined.getTime()`이 `TypeError`가 된다. **어긋난 입력을 오류 종류
+ * 하나로 모으는 것**이 이 검사의 값어치다 — `Cannot read properties of undefined
+ * (reading 'getTime')`은 무엇을 잘못 넘겼는지 말해 주지 않고, 이 함수를 잡지 않는
+ * 경로(`formatLocalDateKey`)에서는 그 문구가 그대로 500 응답의 원인 기록이 된다.
+ *
+ * @throws {RangeError} 값이 없거나, 유효하지 않은 `Date`거나, UTC 자정이 아닐 때
+ */
+export function assertLocalDateKey(dateKey: Date): void {
+  if (dateKey == null) {
+    throw new RangeError(
+      'assertLocalDateKey: 날짜가 없다 (null 또는 undefined)',
+    );
+  }
+
+  if (Number.isNaN(dateKey.getTime())) {
+    throw new RangeError(
+      'assertLocalDateKey: 유효하지 않은 Date가 넘어왔다 (Invalid Date)',
+    );
+  }
+
+  if (dateKey.getTime() % MILLISECONDS_PER_DAY !== 0) {
+    throw new RangeError(
+      `assertLocalDateKey: UTC 자정이 아닌 Date다 (${dateKey.toISOString()}). ` +
+        '시각에서 날짜를 뽑으려면 toLocalDateKey를, 사용자가 고른 날짜 문자열이라면 ' +
+        'parseLocalDateKey를 거쳐라',
+    );
+  }
+}
+
+/**
+ * 날짜 키(`UTC 자정 Date`)를 `"2026-08-01"` 형식 문자열로 바꾼다. `parseLocalDateKey`의
+ * 반대 방향이고, **`@db.Date` 컬럼에서 읽은 값을 밖으로 내보낼 때 쓴다.**
+ *
+ * `Date`를 그대로 내보내면 받는 쪽이 자기 로컬 타임존으로 해석한다. UTC 자정은 음수
+ * 오프셋 지역에서 **전날 오후**이므로, 8월 1일 시작인 할 일이 7월 31일 시작으로 보인다.
+ * 날짜만 있고 시각이 없는 값에는 애초에 타임존이 없으므로 문자열이 옳은 표현이다.
+ *
+ * 구현이 `toISOString`을 자르는 것은 그 함수에 로컬 컴포넌트를 쓸 변형이 없기 때문이다.
+ * `getFullYear`/`getMonth`/`getDate`로 조립하면 로컬 타임존에서 하루 밀리는 함정이
+ * 되살아나고, **한국 시간대(UTC+9)에서는 그 실수가 테스트에 드러나지도 않는다**
+ * (UTC 자정의 로컬 날짜가 같은 날이다).
+ *
+ * @throws {RangeError} `dateKey`가 유효하지 않거나 UTC 자정이 아닐 때
+ */
+export function formatLocalDateKey(dateKey: Date): string {
+  // 검사를 `assertLocalDateKey`에 맡긴다. 같은 규칙을 `Date`를 인자로 받는 자리도
+  // 걸어야 하는데, 두 곳에 두면 한쪽만 고쳐지는 날이 온다.
+  assertLocalDateKey(dateKey);
+
+  return dateKey.toISOString().slice(0, 10);
 }

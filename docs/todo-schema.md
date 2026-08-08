@@ -1,6 +1,6 @@
 # todo 스키마
 
-> 기준: `prisma/schema.prisma` · 마이그레이션 `20260731075406_init_todo_entities`
+> 기준: `prisma/schema.prisma` · 마이그레이션 `20260731075406_init_todo_entities`(테이블 생성), `20260731164011_fix_todo_history_user_id_comment`(컬럼 코멘트 수정), `20260805123230_active_period_timestamptz`(활성 기간을 날짜에서 순간으로), `20260807162419_active_period_check`(활성 기간 CHECK 제약)
 
 ## 전체 그림부터
 
@@ -86,8 +86,8 @@ appUser ──┬─< todoTemplate ──< todoHistory
 | `shouldDoAt` | `should_do_at` | `timestamptz(3)` | false | | 언제까지 해야 하는지. **일회성 전용** |
 | `targetValue` | `target_value` | `numeric(12,2)` | false | | 목표 수치. 일반 타입에서는 비어 있다 |
 | `targetUnit` | `target_unit` | `varchar(16)` | false | | 목표 수치의 단위 ("걸음", "잔") |
-| `activeFrom` | `active_from` | `date` | false | | 반복 시작일 (이 날 포함). **매일 반복 전용** |
-| `activeUntil` | `active_until` | `date` | false | | 반복 종료일 (이 날 포함). 비어 있으면 무기한 |
+| `activeFrom` | `active_from` | `timestamptz(3)` | false | | 활성 시작 순간 (이 순간 포함). **매일 반복 전용** |
+| `activeUntil` | `active_until` | `timestamptz(3)` | false | | 활성 상한 순간 (**이 순간 미포함**). 비어 있으면 무기한 |
 | `createdAt` | `created_at` | `timestamptz(3)` | true | 기본값 `now()` | 만든 일시 |
 | `updatedAt` | `updated_at` | `timestamptz(3)` | true | 자동 갱신 | 마지막으로 고친 일시 |
 | `deletedAt` | `deleted_at` | `timestamptz(3)` | false | | 삭제 일시. 행은 남겨 둔다 |
@@ -98,6 +98,17 @@ appUser ──┬─< todoTemplate ──< todoHistory
 |---|---|---|
 | UNIQUE | `(todo_id, user_id)` | `todoId`만으로도 행이 정해지므로 논리적으로는 중복이다. `todoHistory`가 이 두 컬럼을 묶어 참조하는데, Postgres가 그런 참조의 대상 쪽에 같은 조합의 유일 제약을 요구해서 둔다 |
 | INDEX | `(user_id, deleted_at)` | 목록 조회 두 가지가 모두 `userId`로 좁히고 삭제되지 않은 것만 보므로 함께 묶었다 |
+| CHECK | `todo_template_active_period_check` — 두 값이 모두 있으면 `active_from < active_until` | 동시 수정의 패자가 뒤집힌·빈 활성 기간을 저장하는 것을 막는 최종 방어다 (아래 [활성 기간](#활성-기간은-순간이고-판정은-반열림이다) 절 참고) |
+
+### 활성 기간은 순간이고 판정은 반열림이다
+
+`activeFrom`·`activeUntil`은 날짜(`date`)가 아니라 **순간**(`timestamptz(3)`)이고, 활성 판정은 `activeFrom <= 순간 < activeUntil`이다 — 시작 순간은 포함되고 상한 순간은 포함되지 않는다.
+
+상한을 미포함으로 정한 이유가 있다. 순간에는 "그날의 끝"이 없어서, 상한을 포함으로 두면 "8월 31일까지"를 `23:59:59.999…` 같은 하루의 마지막 순간으로 표현해야 하고 그 값은 정밀도에 따라 달라진다. 미포함 상한이면 다음 날 자정 하나로 끝나고, 이어지는 두 기간이 겹치지도 비지도 않는다.
+
+`timestamptz`는 이름과 달리 타임존을 저장하지 않는다 — 받은 값을 UTC로 정규화한 **순간 하나**를 저장한다. 그래서 같은 값이 유저마다 다른 벽시계 시각으로 읽히고, "그 순간에 활성인가"라는 질문의 답은 타임존과 무관하게 하나다.
+
+**뒤집힌·빈 기간은 CHECK 제약이 막는다** (`todo_template_active_period_check`, 마이그레이션 `20260807162419_active_period_check`). 두 값이 모두 있으면 `active_from < active_until`이어야 한다 — 등호가 없는 이유는 판정이 반열림이라 두 값이 같으면 만족하는 순간이 없는 빈 구간이기 때문이고, Service 검증(`assertShape`)의 `>=` 거절과 같은 경계다. NULL은 그쪽 제한이 없다는 뜻이라 허용한다. Service가 같은 규칙으로 먼저 400을 던지는데도 제약을 둔 이유는 `updateTodo`의 읽기와 쓰기 사이에 잠금이 없어서다 — 서로 반대쪽 필드를 고치는 두 요청이 각자의 스냅샷으로 검증을 통과하면 패자의 저장이 뒤집힌·빈 기간을 만들고, 그 마지막 경로를 DB가 거절한다(사용자 확정 — 트랜잭션 직렬화 대신 CHECK).
 
 ### 종류와 반복 방식은 만든 뒤 바꿀 수 없다
 
@@ -129,7 +140,7 @@ appUser ──┬─< todoTemplate ──< todoHistory
 |---|---|---|---|---|---|
 | `todoHistoryId` | `todo_history_id` | `BIGSERIAL` | true | PK | id |
 | `todoId` | `todo_id` | `bigint` | true | 묶음 FK | 어떤 할 일의 기록인지 |
-| `userId` | `user_id` | `bigint` | true | 묶음 FK + FK → `app_user` | 소유자. **반드시 정의에서 가져와 채운다** |
+| `userId` | `user_id` | `bigint` | true | 묶음 FK + FK → `app_user` | 소유자. **요청자의 식별자를 넣는다** (아래 입력 경계 표) |
 | `historiedOn` | `historied_on` | `date` | true | UNIQUE의 일부 | 이 기록이 속한 날짜. **의미가 반복 방식에 따라 갈린다** (아래) |
 | `targetValue` | `target_value` | `numeric(12,2)` | false | | 그날 기준의 목표 수치 (정의에서 복사) |
 | `targetUnit` | `target_unit` | `varchar(16)` | false | | 그날 기준의 목표 단위 (정의에서 복사) |
@@ -184,7 +195,9 @@ appUser ──┬─< todoTemplate ──< todoHistory
 | | 조건 | 결과 |
 |---|---|---|
 | 일회성 | **완료된 기록**(완료 시각이 채워진, 취소되지 않은 기록)이 없는 것 전부. **날짜로 거르지 않는다** | 완료할 때까지 계속 나온다. 진행값만 입력한 상태도 목록에 남는다 |
-| 매일 반복 | 그날 활성 기간 안(양 끝 포함). 그날 기록을 0~1개 붙여 준다 | 어제 미완료는 어제로 남고 **오늘로 밀려오지 않는다** |
+| 매일 반복 | **요청 순간**이 활성 기간 안(반열림: `activeFrom <= 순간 < activeUntil`). 그날 기록을 0~1개 붙여 준다 | 어제 미완료는 어제로 남고 **오늘로 밀려오지 않는다** |
+
+매일 반복의 활성 판정은 요청 순간과 `active_from`/`active_until`을 **그대로 비교한다**(사용자 확정 — 서버가 시간 처리를 하지 않고 클라이언트가 해석한다). 붙여 줄 기록은 여전히 유저 타임존 기준 날짜(`historied_on`)로 찾는다.
 
 **완료 여부를 누가 판정하는지가 둘이 다르다.** 일회성의 "아직 완료 안 됨"은 **쿼리 조건 그 자체**라 DB에서 걸러진다. 매일 반복은 기록을 붙여 주기만 하고 **완료 판정은 위 계층(Service)에 남긴다.** 그 차이가 Repository와 Service의 경계다.
 
@@ -201,8 +214,17 @@ appUser ──┬─< todoTemplate ──< todoHistory
 | `email` | 소문자로 바꾸고 앞뒤 공백 제거 | 같은 사람이 계정 두 개를 갖는다 |
 | `time_zone` | IANA 타임존 이름인지 (`Intl.supportedValuesOf('timeZone')`) | **그 유저의 모든 날짜 계산이 계속 실패한다** |
 | `remind_at` | `HH:mm` 형식인지 (00~23시, 00~59분). 정규식은 표 아래에 | 알림 대상을 문자열 일치로 찾으므로 **오류 하나 없이 영영 알림이 가지 않는다** |
-| `active_from`·`active_until` | `parseLocalDateKey`로 만든 값 | 직접 만든 날짜는 **하루 밀려 저장된다** |
-| `todo_history.user_id` | 정의에서 가져와 채운다 | 묶음 외래키가 막아 주지만, 그 오류는 원인을 알기 어렵다 |
+| `todo_history.user_id` | **요청자의 식별자**를 넣는다 (표 아래 설명) | 소유자 검사와 묶음 외래키를 **둘 다 통과해** 남의 할 일에 기록이 쓰인다 |
+
+`active_from`·`active_until`은 이 표에서 빠졌다. 순간 컬럼(`timestamptz`)이 되면서 `should_do_at`과 같은 성질이 됐고, 날짜 형식 검증이 필요 없다 — 시간 해석은 클라이언트의 몫이다(사용자 확정).
+
+`todo_history.user_id`는 다른 셋과 성질이 다르다. 형식을 다듬는 문제가 아니라 **값을 어디서 가져오는가**의 문제이고, 어겼을 때 아무 오류도 나지 않는다.
+
+완료 기록을 저장하는 경로(`upsertForHistoriedOn`)가 `(todo_id, user_id)`로 정의를 찾아 **소유자를 검사한다.** 그래서 이 값이 요청자를 가리켜야 남의 할 일에 기록을 붙이려는 요청이 그 자리에서 걸린다. **정의 행에서 읽은 값을 그대로 옮기면 그 검사가 무력화될 수 있다** — 소유자로 좁혀 읽은 정의라면 그 값이 요청자와 같아 결과가 다르지 않지만, 좁히지 않고 읽은 정의에서 가져오면 그 정의와 자기 자신을 비교하는 동어반복이 된다.
+
+**그 경로에서는 묶음 외래키도 통과한다.** 값이 정의와 일치하기 때문이다 — 요청자가 아닌 제3자의 것으로 일치할 뿐이고, 외래키는 값이 맞는지만 보고 어디서 왔는지는 모른다. 두 겹이 모두 뚫리는 유일한 경로다. 실패 경로와 근거는 `src/todos/todo-histories.repository.ts`의 `TodoHistorySnapshot` 주석에 있다.
+
+**실제 데이터베이스의 컬럼 코멘트도 이 방향으로 갱신했다**(마이그레이션 `20260731164011_fix_todo_history_user_id_comment`). 이 방향이 어떻게 뒤집혔는지는 그 파일의 SQL 주석에 있다.
 
 `remind_at`에 쓸 정규식이다. 표 안에 두면 마크다운이 파이프를 열 구분자로 읽어 표가
 깨지므로(이스케이프하면 렌더링은 되지만 raw 텍스트에서 복사하면 틀린 식이 된다) 여기에
@@ -222,4 +244,4 @@ Supabase는 `public` 스키마에 새로 만들어지는 모든 테이블에 `an
 
 **이 프로젝트는 현재 Data API(DB를 HTTP로 직접 노출하는 기능)가 꺼져 있어서 그 권한에 닿을 경로가 없다.** 지금 뚫려 있는 구멍을 막는 것이 아니라 그 기능을 켜는 날을 위한 대비이고, 백엔드에 아무 영향이 없으므로 비용이 0이다.
 
-**RLS와 컬럼 설명(DB 코멘트)은 Prisma가 표현하지 못해 마이그레이션 SQL에 손으로 넣었다.** `prisma migrate diff`가 둘 다 감지하지 못하므로 마이그레이션을 다시 뽑으면 조용히 사라진다 — `test/schema-guard.e2e-spec.ts`가 `public`의 모든 테이블과 컬럼을 훑어 빠진 것을 잡는다. 목록을 코드에 적어 두지 않았기 때문에 **앞으로 추가되는 테이블에도 자동으로 적용된다.**
+**RLS·컬럼 설명(DB 코멘트)·활성 기간 CHECK 제약은 Prisma가 표현하지 못해 마이그레이션 SQL에 손으로 넣었다.** `prisma migrate diff`가 셋 다 감지하지 못하므로 마이그레이션을 다시 뽑으면 조용히 사라진다. RLS와 코멘트는 `test/schema-guard.e2e-spec.ts`가 `public`의 모든 테이블과 컬럼을 훑어 빠진 것을 잡는다 — 목록을 코드에 적어 두지 않았기 때문에 **앞으로 추가되는 테이블에도 자동으로 적용된다.** CHECK 제약은 `test/todos.e2e-spec.ts`의 "활성 기간 CHECK 제약" 절이 직접 삽입·갱신의 거절로 잡는다.

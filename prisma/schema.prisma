@@ -210,18 +210,31 @@ model TodoTemplate {
   targetValue Decimal? @map("target_value") @db.Decimal(12, 2)
   targetUnit  String?  @map("target_unit") @db.VarChar(16)
 
-  /// 매일 반복(DAILY) 할 일이 활성인 기간. 시작일과 종료일 **양쪽을 포함**한다.
-  /// 종료일이 비어 있으면 기한 없이 계속된다.
+  /// 매일 반복(DAILY) 할 일이 활성인 기간. 날짜가 아니라 **순간**이고, 판정은
+  /// **반열림 구간**이다 — `activeFrom <= 순간 < activeUntil`(사용자 최종 확정).
+  /// 시작 순간은 포함되고 상한 순간은 포함되지 않으며, 비어 있는 쪽은 그쪽 제한이
+  /// 없다는 뜻이다.
   ///
-  /// 시각이 아니라 날짜만 저장한다(`date` 타입). 기간 판정이 유저가 보는 날짜
-  /// 기준이라 시·분이 끼면 경계에서 어긋나기 때문이다.
+  /// 반열림으로 정한 이유: 순간에는 "그날의 끝"이 없다. 상한을 포함으로 두면
+  /// "8월 31일까지"를 `2026-08-31T23:59:59.999…`처럼 하루의 마지막 순간으로
+  /// 표현해야 하는데 그 값은 정밀도에 따라 달라진다. 미포함 상한이면 다음 날
+  /// 자정 하나로 끝나고, 이어지는 두 기간이 겹치지도 비지도 않는다.
   ///
-  /// **여기에 넣을 값을 `new Date(2026, 7, 1)`처럼 직접 만들지 마라.** 그렇게 만든
-  /// 값은 한국 시간대에서 하루 앞으로 밀려 저장된다 — 이유는
-  /// `src/todos/todo-local-date.ts`에 있고, 그 파일의 `parseLocalDateKey('2026-08-01')`
-  /// 를 쓰면 안전하다.
-  activeFrom  DateTime? @map("active_from") @db.Date
-  activeUntil DateTime? @map("active_until") @db.Date
+  /// 서버는 이 값에 날짜 의미를 부여하지 않는다 — **시간 해석은 클라이언트의
+  /// 몫이라는 전제**(사용자 확정)이고, 활성 판정은 요청 순간과 이 두 값을 그대로
+  /// 비교한다. `date`에서 `timestamptz(3)`로 바꾼 것이라 유저 타임존 변환이
+  /// 성립한다 — 같은 값 하나가 유저마다 다른 벽시계 시각으로 읽히고, "그 순간에
+  /// 활성인가"는 타임존과 무관하게 답이 하나다.
+  ///
+  /// **뒤집힌·빈 기간은 DB의 CHECK 제약이 막는다**
+  /// (`todo_template_active_period_check` — 두 값이 모두 있으면
+  /// `active_from < active_until`, 등호 없음). Service의 `assertShape`가 같은
+  /// 규칙으로 먼저 400을 던지지만, `updateTodo`의 읽기와 쓰기 사이에 잠금이 없어
+  /// 동시 수정의 패자가 검증을 지나 저장할 수 있다 — 그 최종 방어가 이 제약이다.
+  /// Prisma가 CHECK를 표현하지 못해 마이그레이션 SQL에 손으로 넣었고
+  /// (`20260807162419_active_period_check`), `migrate diff`도 비교하지 않는다.
+  activeFrom  DateTime? @map("active_from") @db.Timestamptz(3)
+  activeUntil DateTime? @map("active_until") @db.Timestamptz(3)
 
   createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
   updatedAt DateTime  @updatedAt @map("updated_at") @db.Timestamptz(3)
@@ -266,9 +279,18 @@ model TodoHistory {
   /// 정의를 함께 읽게 됐다. **그래서 조회 성능은 더 이상 이 컬럼을 정당화하지 않고,
   /// 외래키가 정당화한다.**
   ///
-  /// **반드시 `TodoTemplate`에서 가져와 채워라.** 로그인한 사용자 정보에서 채우면
-  /// 남의 할 일에 자기 기록을 붙이는 요청이 통과한다. 아래 복합 외래키가 DB에서
-  /// 막아 주긴 하지만, 그때 나오는 오류는 원인을 알기 어려운 제약 위반 메시지다.
+  /// **이 값을 채울 때는 요청자의 식별자를 쓴다.** 저장 경로(`upsertForHistoriedOn`)가
+  /// `(todo_id, user_id)`로 정의를 찾아 **소유자를 검사**하기 때문이다. 요청자를 넣으면
+  /// 남의 할 일에 기록을 붙이려는 요청이 그 자리에서 "그런 할 일이 없다"로 걸린다.
+  ///
+  /// **정의 행에서 읽은 값을 그대로 옮기면 그 검사가 무력화될 수 있다.** 소유자로 좁혀
+  /// 읽은 정의라면 그 값이 요청자와 같아 결과가 다르지 않지만, 좁히지 않고 읽은 정의에서
+  /// 가져오면 그 정의와 자기 자신을 비교하는 동어반복이 되어 아무것도 거르지 못한다.
+  /// 근거와 실패 경로는 `src/todos/todo-histories.repository.ts`의 `TodoHistorySnapshot`
+  /// 주석에 있다.
+  ///
+  /// 아래 복합 외래키가 최후의 방어로 남지만 그것에 기대지 마라 — 위 경로는 그것도
+  /// 통과하고, 걸리는 경우에도 나오는 오류는 원인을 알기 어려운 제약 위반 메시지다.
   userId BigInt @map("user_id")
 
   /// 이 기록이 속한 날짜. 값은 반드시 `src/todos/todo-local-date.ts`의
