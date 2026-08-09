@@ -1,10 +1,10 @@
 # CONTEXT
 
-> 마지막 업데이트: 2026-08-08
+> 마지막 업데이트: 2026-08-10
 
 ## 역할
 
-할 일(todo) 도메인이다. 조회와 쓰기를 제공하는 Service, 두 테이블에 접근하는 Repository, 두 테이블이 함께 쓰는 **날짜 계산**, 저장된 행을 **밖으로 내보낼 형태로 바꾸는 순수 함수**를 담당한다. Controller와 요청 DTO(Data Transfer Object, 요청·응답 형태를 담는 클래스)는 아직 없다.
+할 일(todo) 도메인이다. HTTP 경계인 Controller와 요청 DTO(Data Transfer Object, 요청·응답 형태를 담는 클래스), 조회와 쓰기를 제공하는 Service, 두 테이블에 접근하는 Repository, 두 테이블이 함께 쓰는 **날짜 계산**, 저장된 행을 **밖으로 내보낼 형태로 바꾸는 순수 함수**를 담당한다.
 
 ## 먼저 알아야 할 구조
 
@@ -33,9 +33,21 @@
 | `todo-errors.ts` | Repository가 던지는 도메인 오류. 위 계층이 타입으로 구분한다 |
 | `todos.service.ts` | 조회 4종과 쓰기 6종. **이 도메인의 유일한 진입점이다** |
 | `todos.service.spec.ts` | 무엇을 반환하고 어떤 입력을 거절하는가 |
+| `todos.controller.ts` | HTTP 경계. `/api/v1/todo` 아래 8개 라우트를 `TodosService`에 연결만 한다 — **판단이 없다** |
+| `dto/*.dto.ts` | 요청 본문·쿼리의 형식 검증. 각 파일 옆의 `*.dto.spec.ts`가 `validate()`를 직접 불러 규칙을 고정한다 |
 | `todos.module.ts` | 위를 등록하고 `TodosService`만 내보낸다. `UsersModule`을 물고 있다 |
 
-**검증 방식이 계층마다 다르다.** Repository는 `test/todos.e2e-spec.ts`가 실제 DB에 붙어서 하고 단위 테스트를 만들지 않는다 — DB 접근을 가짜로 바꾸면 "어떤 인자로 불렸는가"만 확인하게 되고, 그것은 동작이 아니라 구현 방식을 검사하는 것이다. Service는 반대로 단위 테스트가 중심이다. 볼 것이 쿼리 결과가 아니라 **무엇을 반환하고 어떤 입력을 거절하는가**여서, 그것은 Repository를 대역으로 두고도 그대로 관찰된다.
+**검증 방식이 계층마다 다르다.** Repository는 `test/todos.e2e-spec.ts`가 실제 DB에 붙어서 하고 단위 테스트를 만들지 않는다 — DB 접근을 가짜로 바꾸면 "어떤 인자로 불렸는가"만 확인하게 되고, 그것은 동작이 아니라 구현 방식을 검사하는 것이다. Service는 반대로 단위 테스트가 중심이다. 볼 것이 쿼리 결과가 아니라 **무엇을 반환하고 어떤 입력을 거절하는가**여서, 그것은 Repository를 대역으로 두고도 그대로 관찰된다. Controller는 `test/todos-http.e2e-spec.ts`가 라우팅·전역 파이프·직렬화가 함께 걸린 상태로 검증한다 — 그것들을 벗겨 낸 Controller는 Service를 한 번 부르는 함수라 단위로 검증할 것이 남지 않는다. DTO만 예외로 단위 spec(`validate()` 직접 호출)이 옆에 있다 — 검증 규칙 자체는 프레임워크 없이 관찰되기 때문이다.
+
+## HTTP 경계 (`todos.controller.ts`, `dto/`)
+
+라우트 8개가 전부 `/api/v1/todo` 아래다(단수형 `/todo`·수정 `PUT`은 사용자 확정 — 복수형 추천이 기각됐다). 요청자 식별은 `X-User-Id` 헤더의 임시 통로(`src/common/request-user-id.decorator.ts`)이고, 인증이 들어오면 그 데코레이터 구현만 교체한다.
+
+**`PUT /todo/:todoId`는 메서드가 `PUT`이지만 동작은 부분 갱신이다**(사용자 확정) — 키 생략은 "그대로 두라", `null`은 "비우라"이고 그 해석은 Service의 몫이다. `UpdateTodoDto`는 `title`만 `null`을 거절한다(비울 수 없는 필수 컬럼). `@IsOptional()`은 `null`과 `undefined`를 모두 통과시키므로 그 구분은 `@ValidateIf((dto) => dto.title !== undefined)`로 만든다.
+
+**진행값과 완료가 라우트로 갈라져 있다**(`PUT …/progress`, `PUT`·`DELETE …/completion`) — 저장 하나가 두 사실을 동시에 바꾸지 않는다는 확정 그대로다. 기록 라우트에 `historyId`가 없다 — 저장 모델이 `(todoId, 날짜)` upsert 하나라 식별할 하위 자원이 따로 없다. 완료취소의 `performedAt`이 본문이 아니라 쿼리인 것은 DELETE 본문을 중간 장비가 버릴 수 있어서다.
+
+**경계가 맡는 검증은 필드 하나하나의 형식까지다** — `title` 200자, `remindAt`의 `HH:mm`, `targetUnit` 16자(`VarChar(16)`), `targetValue`·`progressValue`의 `Decimal(12,2)` 범위(±9,999,999,999.99 — `DECIMAL_12_2_MAX`를 `@Max`·`@Min` 쌍으로. 음수 자체는 거절하지 않는다 — 저장 가능한 음수를 거절할 확정 근거가 없다), 날짜 문자열의 `Date` 변환(`@Type(() => Date)`+`@IsDate()` — 변환만 걸면 Invalid Date가 Service로 흘러 500이 된다). 전부 근거가 컬럼 형식이다 — 저장 자체가 불가능한 값이 DB까지 흘러가면 클라이언트 입력 문제가 500으로 나간다. 경로 파라미터와 `X-User-Id`의 int8 상한(2^63−1)도 같은 근거로 `parseBigIntOrNull`이 거른다. 목표치 쌍·활성 기간 같은 **조합 규칙은 Service의 `assertShape` 한 곳에 있다** — 경계에 복사하면 같은 규칙이 두 곳에 산다. DTO에 없는 필드는 전역 `ValidationPipe`(`APP_PIPE`, `src/app.module.ts`)의 `forbidNonWhitelisted`가 400으로 거절한다 — `UpdateTodoDto`에 `todoType`·`completeType`이 없는 것이 그래서 "조용히 버려짐"이 아니라 "거절"이 된다.
 
 ## 목록을 어떻게 조회하는가
 
@@ -167,7 +179,7 @@
 | `toHistoriedOn({ completeType, createdAt, performedAt, timeZone })` | **완료 기록 날짜를 만드는 유일한 통로** | `todo_history.historied_on` |
 | `toLocalDateKey(instant, tz)` | 순간이 유저에게 **며칠인지** 계산할 때 | `findDailyActiveAt`의 `historiedOn` 인자, `getTodo`가 이력 범위 순간을 자를 때 |
 | `toNextLocalDayStart(at, tz)` | 유저 타임존에서 **다음 달력 날짜가 시작되는 최초의 순간**이 필요할 때 | `listTodosOn`의 매일 반복 마감. 날짜 키가 아니라 **순간**을 돌려준다 |
-| `parseLocalDateKey('2026-08-01')` | 사용자가 **고른 날짜 문자열**에서 날짜 키를 만들 때 | 지금 프로덕션 경로에는 없다 — 테스트가 날짜 키 픽스처를 만들 때 쓰고, 날짜 문자열을 받는 경계(Controller·DTO)가 생기면 그쪽의 통로다 |
+| `parseLocalDateKey('2026-08-01')` | 사용자가 **고른 날짜 문자열**에서 날짜 키를 만들 때 | 지금 프로덕션 경로에는 없다 — 테스트가 날짜 키 픽스처를 만들 때 쓴다. 지금의 HTTP 경계는 날짜를 전부 **순간**(ISO 시각 문자열 → `Date`)으로 받아 이 함수를 지나지 않고, `YYYY-MM-DD`만 받는 필드가 생기면 그쪽의 통로다 |
 | `assertLocalDateKey(dateKey)` | **받은 `Date`가 날짜 컬럼에 넣어도 되는 값인지** 볼 때 | `formatLocalDateKey`의 내부 검사 (Service는 더 이상 직접 부르지 않는다) |
 | `formatLocalDateKey(dateKey)` | 날짜 컬럼에서 읽은 값을 **밖으로 내보낼 때** | 응답의 `historiedOn` |
 
@@ -335,13 +347,16 @@
 
 ## 아직 없는 것
 
-- **Controller와 요청 DTO(Data Transfer Object, 요청·응답 형태를 담는 클래스).** 그래서 `remindAt`의 `HH:mm` 형식 검증과 타임존 이름 유효성 검증도 아직 없다 — 값을 받는 경계의 책임이다. **날짜 문자열을 `Date`로 바꾸는 것도 같은 자리이고, 지금 그 일을 하는 것은 `TodosService`를 부르는 코드다**(위 "Service는 날짜를 `Date`로 받고"). 목록은 나눈 것 둘(`listOnce`·`listDailyOn`)과 병합한 것 하나(`listTodosOn`)가 다 있으므로, **Controller는 화면이 요구하는 쪽을 골라 노출하면 된다**
+- **인증·인가.** user 도메인의 Controller가 생길 때까지 보류다(사용자 확정). 그동안 요청자 식별은 `X-User-Id` 헤더다 — 위 "HTTP 경계" 참고. 타임존 이름 유효성 검증도 그쪽(user 경계)의 책임이라 아직 없다
+- **`listOnce`·`listDailyOn`의 개별 노출.** 병합 목록(`GET /todo` → `listTodosOn`)만 노출했다 — 화면 요구가 생기면 라우트만 더한다
 - **알림 대상을 찾는 조회와 그 인덱스.** 실제 조회 조건이 정해질 때(삭제 여부·활성 기간을 함께 볼 것이다) 그에 맞춰 인덱스를 만든다. 미리 만들면 아무도 읽지 않는 인덱스에 쓰기 비용만 든다
 - **일회성 예정일이 지났을 때의 처리.** 예정일을 바꿔도 기록의 날짜는 움직이지 않으므로 옮길 것은 없다. 다만 "예정일이 지난 일회성"을 화면에서 어떻게 다룰지는 Service가 정한다
 
 ## 의존성
 
-- `@nestjs/common` — `Injectable`, `Module`, `Logger`, `BadRequestException`, `NotFoundException`
+- `@nestjs/common` — `Injectable`, `Module`, `Logger`, `BadRequestException`, `NotFoundException`, Controller의 라우팅 데코레이터
+- `src/common/parse-bigint.pipe.ts`·`src/common/request-user-id.decorator.ts` — Controller가 경로 파라미터와 `X-User-Id` 헤더를 `bigint`로 받는 통로
+- `class-validator`·`class-transformer` — `dto/`의 형식 검증과 변환. 전역 `ValidationPipe`는 `src/app.module.ts`의 `APP_PIPE`가 건다
 - `src/users/users.repository.ts` — `TodosService`가 생성자로 주입받아 유저 타임존을 읽는다. `TodosModule`이 `UsersModule`을 import한다 — **이 폴더가 손을 뻗는 유일한 다른 도메인이다**
 - `src/prisma/prisma.service.ts` — Repository가 생성자로 주입받는다
 - `src/generated/prisma` — 모델과 enum 타입. `todo-local-date.ts`와 `todo-view.ts`는 **타입으로만** 가져와 실행 시점 의존이 없다. `todo-view.ts`가 `Prisma.Decimal`을 값으로 import하지 않고 `toNumber()`만 부르는 것도 그래서다
