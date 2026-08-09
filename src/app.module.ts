@@ -1,5 +1,6 @@
-import { Module } from '@nestjs/common';
+import { Module, ValidationPipe } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
+import { APP_PIPE } from '@nestjs/core';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { BigIntJsonModule } from './common/bigint-json.module';
@@ -25,6 +26,24 @@ import { TodosModule } from './todos/todos.module';
     TodosModule,
   ],
   controllers: [AppController],
-  providers: [AppService],
+  providers: [
+    AppService,
+    // 전역 ValidationPipe. `main.ts`의 `useGlobalPipes`가 아니라 모듈 제공
+    // (`APP_PIPE`)으로 거는 이유는 e2e가 `main.ts`를 거치지 않기 때문이다 —
+    // 부트스트랩에만 두면 테스트는 검증 없는 앱을 보고, 검증이 빠진 채 배포돼도
+    // 어떤 테스트도 잡지 못한다(`BigIntJsonModule`을 모듈에 둔 것과 같은 근거).
+    {
+      provide: APP_PIPE,
+      useValue: new ValidationPipe({
+        // DTO에 없는 필드는 버리는 대신 400으로 거절한다. 조용히 버리면
+        // 클라이언트가 오타 난 필드를 보냈다는 사실을 알 수 없다.
+        whitelist: true,
+        forbidNonWhitelisted: true,
+        // 쿼리·본문을 DTO 클래스 인스턴스로 변환한다. `@Type(() => Date)` 같은
+        // 변환 데코레이터가 이 옵션 없이는 동작하지 않는다.
+        transform: true,
+      }),
+    },
+  ],
 })
 export class AppModule {}

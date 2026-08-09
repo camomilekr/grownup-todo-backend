@@ -2,6 +2,7 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { INestApplication } from '@nestjs/common';
 import * as request from 'supertest';
 import { AppModule } from './../src/app.module';
+import { setupApp } from './../src/app-setup';
 
 describe('AppController (e2e)', () => {
   let app: INestApplication;
@@ -12,6 +13,10 @@ describe('AppController (e2e)', () => {
     }).compile();
 
     app = moduleFixture.createNestApplication();
+    // 프로덕션(`main.ts`)과 같은 HTTP 설정(전역 prefix)을 여기서도 건다.
+    // e2e는 `main.ts`를 거치지 않으므로, 공용 함수를 양쪽이 함께 불러야
+    // 테스트가 보는 경로와 실제 경로가 갈리지 않는다.
+    setupApp(app);
     await app.init();
   });
 
@@ -22,11 +27,15 @@ describe('AppController (e2e)', () => {
     await app.close();
   });
 
-  it('/ (GET)', () => {
+  it('전역 prefix가 걸려 /api/v1 (GET)이 200이다', () => {
     return request(app.getHttpServer())
-      .get('/')
+      .get('/api/v1')
       .expect(200)
       .expect('Hello World!');
+  });
+
+  it('prefix 없는 / (GET)은 404다', () => {
+    return request(app.getHttpServer()).get('/').expect(404);
   });
 
   // 부트된 앱에서 BigInt 직렬화가 켜져 있는지 본다. `BigIntJsonModule`의 단위
