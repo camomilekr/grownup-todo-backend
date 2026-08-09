@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# 워크트리 하나를 규약대로 준비한다. 규약은 `.claude/rules/core.md`.
+# 워크트리 하나를 규약대로 준비한다. 규약은 `.claude/rules/workflow.md`.
 #
 #   .claude/scripts/worktree-new.sh <이름> [base 브랜치]
 #
@@ -56,7 +56,7 @@ cp "$REPO"/docs/plan/*"$NAME".md "$WT/docs/plan/" 2>/dev/null && echo "계획서
 
 # 점유 표식 — 워크트리를 만든 그 자리에서 남긴다.
 # 깨끗한 워크트리는 주인이 없다는 증거가 아니다. 생성부터 첫 쓰기까지 13분이 빈 사고가 있었다
-# (`.claude/ref/incidents.md`). 이 파일이 주인이 있다는 유일한 표식이다.
+# (git-workflow 플러그인 `ref/incidents.md`). 이 파일이 주인이 있다는 유일한 표식이다.
 JOB=$(ls -t "$HOME/.claude/jobs" 2>/dev/null | head -1 || true)
 REC="$WT/docs/dev-loop/$(date '+%Y-%m-%d')-$NAME.md"
 

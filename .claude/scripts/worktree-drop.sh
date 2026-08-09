@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# 워크트리와 브랜치를 정리한다. 규약은 `.claude/rules/core.md`.
+# 워크트리와 브랜치를 정리한다. 규약은 `.claude/rules/workflow.md`.
 #
 #   .claude/scripts/worktree-drop.sh <이름> [--drop-docs]
 #
