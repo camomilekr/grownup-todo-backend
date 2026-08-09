@@ -1,6 +1,6 @@
 # CONTEXT
 
-> 마지막 업데이트: 2026-07-31
+> 마지막 업데이트: 2026-08-10
 
 ## 역할
 
@@ -14,8 +14,21 @@
 | `bigint-json.module.ts` | 그 등록을 **앱 초기화 시점에** 호출한다. `AppModule`이 import한다 |
 | `bigint-json.spec.ts` | 문자열 직렬화·정밀도·멱등성 검증 |
 | `bigint-json.module.spec.ts` | **호출 지점** 검증. 모듈을 초기화하면 켜지는지 본다 |
+| `parse-bigint.pipe.ts` | 경로 파라미터 문자열 → `bigint` 파이프와, 헤더 데코레이터가 공유하는 파싱 함수(`parseBigIntOrNull`) |
+| `parse-bigint.pipe.spec.ts` | 변환·2^53 초과 정밀도 보존·형식 어긋난 입력의 400 거절 |
+| `request-user-id.decorator.ts` | `X-User-Id` 헤더 → `bigint` 파라미터 데코레이터. **인증이 없는 동안의 임시 통로다** — 인증이 들어오면 이 구현만 교체한다 |
 
 ## 핵심 로직
+
+**경로 파라미터와 `X-User-Id` 헤더는 `number`가 아니라 `bigint`로 받는다.** 기본키가
+BIGSERIAL이라 `ParseIntPipe`(`number` 반환)를 거치면 2^53 경계에서 서로 다른 행이 같은
+값이 되어 다른 행을 가리키는 조회가 조용히 성립한다. 파싱 규칙(십진 숫자만, 음수·소수점
+거절)은 `parseBigIntOrNull` 하나를 파이프와 데코레이터가 공유한다 — 각자 파싱하면 두
+자리가 받는 값의 범위가 조용히 갈린다.
+
+**`RequestUserId` 데코레이터는 단위 spec이 없다.** 단위로 만들려면 `ExecutionContext`
+대역을 조립해야 하는데 그것은 동작이 아니라 구현 방식 검사다 — 실제 요청을 지나는
+`test/todos-http.e2e-spec.ts`가 헤더 없음·비숫자 헤더의 400 거절을 고정한다.
 
 **호출 지점은 `BigIntJsonModule.onModuleInit` 하나다. `main.ts`가 아니다.** `bootstrap()`은 어떤 테스트도 실행하지 않는다 — e2e조차 `createNestApplication()`으로 앱을 만들어 `main.ts`를 거치지 않는다. 부트스트랩에만 두면 이 가드는 **아무 테스트도 지나지 않는 코드**가 되어 지워도 전부 초록으로 통과하고, 그동안 **테스트 환경과 프로덕션의 직렬화 동작이 갈린다.** 모듈에 두면 앱을 부트하는 모든 경로가 같은 상태를 본다. **`enableBigIntJsonSerialization()`을 다른 곳에서 직접 부르지 마라.**
 
