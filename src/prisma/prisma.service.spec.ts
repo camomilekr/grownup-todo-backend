@@ -59,15 +59,30 @@ describe('PrismaService', () => {
     expect(connect).toHaveBeenCalledTimes(1);
   });
 
-  it('onModuleDestroy에서 커넥션을 닫는다', async () => {
+  it('onApplicationShutdown에서 커넥션을 닫는다', async () => {
+    // onModuleDestroy가 아니라 onApplicationShutdown이어야 한다. 시그널 수신 시
+    // Nest는 onModuleDestroy → HTTP close → onApplicationShutdown 순서로 부르므로
+    // (@nestjs/core nest-application-context.js 실측), onModuleDestroy에서 닫으면
+    // 처리 중인 요청이 끝나기 전에 DB가 끊긴다 — k8s 정상 종료가 깨진다.
     const moduleRef = await createModule();
     const service = moduleRef.get(PrismaService);
     const disconnect = jest
       .spyOn(service, '$disconnect')
       .mockResolvedValue(undefined);
 
-    await service.onModuleDestroy();
+    await service.onApplicationShutdown();
 
     expect(disconnect).toHaveBeenCalledTimes(1);
+  });
+
+  it('onModuleDestroy 훅을 갖지 않는다', async () => {
+    // 훅이 되살아나면 HTTP 서버가 닫히기 전에 커넥션이 끊기는 회귀다.
+    // 존재 자체를 실패로 고정한다.
+    const moduleRef = await createModule();
+    const service = moduleRef.get(PrismaService);
+
+    expect(
+      (service as { onModuleDestroy?: unknown }).onModuleDestroy,
+    ).toBeUndefined();
   });
 });

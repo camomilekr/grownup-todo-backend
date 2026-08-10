@@ -1,6 +1,6 @@
 # CONTEXT
 
-> 마지막 업데이트: 2026-08-08
+> 마지막 업데이트: 2026-08-10
 
 ## 역할
 
@@ -10,7 +10,7 @@ Prisma 클라이언트를 NestJS DI 컨테이너와 라이프사이클에 붙인
 
 | 파일명 | 역할 |
 |--------|------|
-| `prisma.service.ts` | `PrismaClient`를 상속한 Provider. 생성자에서 어댑터를 만들고 `onModuleInit`/`onModuleDestroy`로 커넥션 풀을 여닫는다 |
+| `prisma.service.ts` | `PrismaClient`를 상속한 Provider. 생성자에서 어댑터를 만들고 `onModuleInit`/`onApplicationShutdown`으로 커넥션 풀을 여닫는다 |
 | `prisma.module.ts` | `PrismaService`를 등록하고 `exports`한다. `@Global()`이 아니다 |
 | `prisma.service.spec.ts` | 배선 단위 테스트. DB에 붙지 않는다 |
 
@@ -155,7 +155,9 @@ DTO 계층이 생기는 라운드가 **이 셋을 한 묶음으로** 처리해�
 
 **`DATABASE_URL`이 비면 생성자가 던진다.** `ConfigModule`의 `validate`(`src/config/env.validation.ts`)가 이미 막지만 한 겹 더 둔 이유가 있다 — 비어 있으면 node-postgres가 libpq 기본값인 localhost로 조용히 붙어서, 장애가 "데이터가 없음"으로 위장한다.
 
-**종료 훅이 `src/main.ts`의 `app.enableShutdownHooks()`에 달려 있다.** 이것을 지우면 `onModuleDestroy`가 불리지 않아 재배포마다 풀러 쪽에 커넥션이 타임아웃까지 남는다.
+**종료 훅이 `src/main.ts`의 `app.enableShutdownHooks()`에 달려 있다.** 이것을 지우면 `onApplicationShutdown`이 불리지 않아 재배포마다 풀러 쪽에 커넥션이 타임아웃까지 남는다.
+
+**커넥션 종료는 `onModuleDestroy`가 아니라 `onApplicationShutdown`이다(2026-08-10 이동).** 시그널 수신 시 Nest는 `onModuleDestroy` → HTTP 서버 close(처리 중 요청 완료 대기) → `onApplicationShutdown` 순서로 부른다 — `onModuleDestroy`에서 닫으면 아직 응답 중인 요청이 끊긴 DB를 만나 k8s 정상 종료가 깨진다. `onModuleDestroy`로 되돌리는 회귀는 spec의 "onModuleDestroy 훅을 갖지 않는다"가 막는다. 추후 Redis 같은 자원도 같은 패턴(`onApplicationShutdown`)으로 닫는다.
 
 ## 의존성
 

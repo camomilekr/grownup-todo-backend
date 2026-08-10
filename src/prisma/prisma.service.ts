@@ -1,7 +1,7 @@
 import {
   Injectable,
   Logger,
-  OnModuleDestroy,
+  OnApplicationShutdown,
   OnModuleInit,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
@@ -18,7 +18,7 @@ import { PrismaClient } from '../generated/prisma/client';
 @Injectable()
 export class PrismaService
   extends PrismaClient
-  implements OnModuleInit, OnModuleDestroy
+  implements OnModuleInit, OnApplicationShutdown
 {
   private readonly logger = new Logger(PrismaService.name);
 
@@ -47,7 +47,11 @@ export class PrismaService
     this.logger.log('Postgres 커넥션 풀을 열었다');
   }
 
-  async onModuleDestroy(): Promise<void> {
+  // onModuleDestroy가 아니라 onApplicationShutdown에서 닫는다. 시그널 수신 시
+  // Nest는 onModuleDestroy → HTTP 서버 close(처리 중 요청 완료 대기) →
+  // onApplicationShutdown 순서로 부른다 — onModuleDestroy에서 닫으면 아직
+  // 응답 중인 요청이 끊긴 DB를 만난다. 추후 Redis 같은 자원도 같은 훅에 둔다.
+  async onApplicationShutdown(): Promise<void> {
     await this.$disconnect();
     this.logger.log('Postgres 커넥션 풀을 닫았다');
   }
