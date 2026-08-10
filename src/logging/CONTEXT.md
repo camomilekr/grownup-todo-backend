@@ -1,6 +1,6 @@
 # CONTEXT
 
-> 마지막 업데이트: 2026-08-10
+> 마지막 업데이트: 2026-08-11
 
 ## 역할
 
@@ -10,7 +10,7 @@ pino 기반 구조화 로깅을 담는다. 도메인 코드는 pino를 모른다
 
 | 파일명 | 역할 |
 |--------|------|
-| `pino-logger.service.ts` | pino를 NestJS `LoggerService`에 맞춘 어댑터. 레벨 매핑(`log`→info, `verbose`→trace, `fatal`→fatal)과 민감 키 redact를 담당 |
+| `pino-logger.service.ts` | pino를 NestJS `LoggerService`에 맞춘 어댑터. 레벨 매핑(`log`→info, `verbose`→trace, `fatal`→fatal)·민감 키 redact·기본 목적지(동기 쓰기 stdout) 생성을 담당 |
 | `request-logging.middleware.ts` | 요청 수신·응답 완료를 info 2건으로 남긴다 — method, url(쿼리를 뗀 경로), query, body(요청 본문), responseBody(응답 본문, 응답 로그에만), 상태 코드, 수신·응답 시각, 소요 시간(ms) |
 | `logging.module.ts` | `PinoLoggerService` 등록·export. `main.ts`가 `app.get()`으로 꺼낸다 |
 | `process-error-handlers.ts` | `uncaughtException`·`unhandledRejection`을 fatal로 남기고 프로세스를 살려 두는 등록 함수 |
@@ -29,7 +29,9 @@ pino 기반 구조화 로깅을 담는다. 도메인 코드는 pino를 모른다
 
 **프로세스 오류 핸들러는 DI Provider가 아니라 함수다.** 프로세스 전역(리스너)을 만지는 배선이라 Nest 라이프사이클에 묶으면 앱 인스턴스가 여럿일 때(테스트) 리스너가 중복 등록된다 — `main.ts`가 부팅 시 한 번 부른다. 리스너를 다는 것만으로 Node 기본 동작(uncaughtException 즉시 종료)이 대체되며, 프로세스를 살리는 것은 사용자 명시 요청이다. **등록 함수는 해제 함수를 반환한다** — 프로세스 전역을 만지는 spec은 그것으로 반드시 원상 복구한다(`src/common/CONTEXT.md`의 프로토타입 규칙과 같은 원리). spec은 `process.emit`으로 발화시키지 않는다 — jest 자체 리스너까지 불려 러너가 오작동하므로, 등록 전후 리스너 차집합으로 우리 리스너만 직접 부른다.
 
-**테스트는 출력을 관찰한다.** `PINO_DESTINATION` 토큰(optional)으로 sink 스트림을 주입해 pino가 실제로 내보낸 JSON 줄을 파싱해 단정한다 — pino 내부 상태를 들여다보지 않는다.
+**기본 목적지는 stdout **동기 쓰기**다(`pino.destination({ sync: true })`, 2026-08-11).** pino 기본값(비동기 SonicBoom)은 flush를 process 'exit' 이벤트에만 등록하는데(소스 확인), **Nest의 시그널 종료는 훅 완료 후 시그널 재발신으로 죽어 'exit'가 불리지 않는다** — 종료 직전의 로그(`ShutdownRegistry`의 "해제 완료" 등)가 유실될 수 있다. 유실은 플랫폼·타이밍 의존이다 — macOS·stdout 파일 리다이렉트·SIGTERM 조건에서 반복 재현됐고, 파이프 조건에서는 재현되지 않았다는 관찰도 있다. 동기 쓰기의 처리량 비용은 이 규모에서 무시하고, 종료 로그의 유실 가능성 쪽을 더 비싸게 봤다.
+
+**테스트는 출력을 관찰한다.** `PINO_DESTINATION` 토큰(optional)으로 sink 스트림을 주입해 pino가 실제로 내보낸 JSON 줄을 파싱해 단정한다 — pino 내부 상태를 들여다보지 않는다. **의도된 예외가 하나 있다**: 기본 목적지의 sync 배선 고정 테스트는 pino 공개 symbol(`pino.symbols.streamSym`)로 목적지 설정을 직접 본다 — 이 배선의 관찰 가능한 동작(시그널 종료 직전 flush)은 프로세스 종료 없이 볼 수 없고, 배선이 지워져도 다른 어떤 테스트도 깨지지 않기 때문이다.
 
 ## 의존성
 

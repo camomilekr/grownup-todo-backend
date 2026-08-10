@@ -4,7 +4,8 @@ import pino from 'pino';
 /**
  * 테스트가 출력을 관찰할 수 있게 pino의 목적지 스트림을 주입하는 토큰.
  * 클래스가 아닌 것을 주입하므로 문자열 대신 상수 토큰을 쓴다(코드 규약).
- * 주입하지 않으면 pino 기본 목적지(stdout)로 나간다.
+ * 주입하지 않으면 stdout에 **동기 쓰기**하는 목적지를 만든다 — 비동기가
+ * 아닌 이유는 생성자 주석에 있다(시그널 종료 시 flush 유실 가능성).
  */
 export const PINO_DESTINATION = Symbol('PINO_DESTINATION');
 
@@ -43,6 +44,17 @@ export class PinoLoggerService implements LoggerService {
     @Inject(PINO_DESTINATION)
     destination?: pino.DestinationStream,
   ) {
+    // 기본 목적지를 동기 쓰기로 만든다. pino 기본값(비동기 SonicBoom)은
+    // flush를 process 'exit' 이벤트에만 등록하는데(pino lib/tools.js의
+    // buildSafeSonicBoom — 소스 확인), Nest의 시그널 종료는 훅 완료 후 시그널
+    // 재발신으로 죽어 'exit'가 불리지 않는다 — 종료 직전의 로그
+    // (ShutdownRegistry의 "해제 완료" 등)가 유실될 수 있다. 유실은 플랫폼·
+    // 타이밍 의존이다: macOS에서 stdout을 파일로 리다이렉트하고 SIGTERM으로
+    // 끝내는 조건에서는 마지막 로그 유실이 반복 재현됐고(2026-08-11, 2회 연속),
+    // stdout이 파이프인 조건에서는 재현되지 않았다는 관찰도 있다. 동기 쓰기의
+    // 처리량 비용은 이 규모의 API에서 무시할 수 있고, 종료 로그는 재배포
+    // 문제를 추적하는 유일한 단서라 유실 가능성 쪽이 더 비싸다.
+    const resolvedDestination = destination ?? pino.destination({ sync: true });
     this.pino = pino(
       {
         // 레벨 필터를 걸지 않는다(trace = 전부 통과). Nest 기본 로거도 모든
@@ -66,7 +78,7 @@ export class PinoLoggerService implements LoggerService {
           censor: '[REDACTED]',
         },
       },
-      destination,
+      resolvedDestination,
     );
   }
 

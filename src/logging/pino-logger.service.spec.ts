@@ -1,4 +1,5 @@
 import { Test, TestingModule } from '@nestjs/testing';
+import pino from 'pino';
 import { PINO_DESTINATION, PinoLoggerService } from './pino-logger.service';
 
 describe('PinoLoggerService', () => {
@@ -30,6 +31,27 @@ describe('PinoLoggerService', () => {
     expect(lines.length).toBeGreaterThan(0);
     return JSON.parse(lines[lines.length - 1]) as Record<string, unknown>;
   }
+
+  it('목적지를 주입하지 않으면 동기 쓰기 목적지를 만든다', async () => {
+    // 배선 고정 테스트 — "출력을 관찰한다" 철학의 의도된 예외다. 이 배선의
+    // 관찰 가능한 동작은 "시그널 종료 직전 로그가 flush되는 것"인데 프로세스
+    // 종료 없이는 볼 수 없고, 배선이 지워져도(pino 기본 비동기 목적지로
+    // 돌아가도) 다른 어떤 테스트도 깨지지 않는다. 그래서 pino의 공개 symbol
+    // API(`pino.symbols.streamSym`)로 목적지의 sync 설정 자체를 고정한다.
+    // 근거는 pino-logger.service.ts 생성자 주석과 CONTEXT.md에 있다.
+    const moduleRef: TestingModule = await Test.createTestingModule({
+      providers: [PinoLoggerService],
+    }).compile();
+    const defaultService = moduleRef.get(PinoLoggerService);
+
+    const stream = (
+      defaultService as unknown as {
+        pino: Record<symbol, { sync?: boolean }>;
+      }
+    ).pino[pino.symbols.streamSym];
+
+    expect(stream.sync).toBe(true);
+  });
 
   // pino 표준 레벨 숫자다 — trace 10, debug 20, info 30, warn 40, error 50, fatal 60
   it.each([
