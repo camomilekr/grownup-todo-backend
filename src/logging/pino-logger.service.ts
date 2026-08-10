@@ -9,10 +9,12 @@ import pino from 'pino';
 export const PINO_DESTINATION = Symbol('PINO_DESTINATION');
 
 /**
- * 요청 body·query 로그에서 가리는 민감 키. 어떤 경우에도 토큰·비밀번호가
- * 로그에 남지 않게 하는 방어선이다 — 미들웨어가 아니라 로거에 두는 이유는,
- * 값을 넘기는 모든 호출 지점이 아니라 출구 한 곳에서 강제하기 위해서다.
- * query도 대상이다 — `/password-reset?token=…`처럼 민감값은 쿼리로도 온다.
+ * 요청 body·query와 응답 responseBody 로그에서 가리는 민감 키. 어떤 경우에도
+ * 토큰·비밀번호가 로그에 남지 않게 하는 방어선이다 — 미들웨어가 아니라 로거에
+ * 두는 이유는, 값을 넘기는 모든 호출 지점이 아니라 출구 한 곳에서 강제하기
+ * 위해서다. query도 대상이다 — `/password-reset?token=…`처럼 민감값은 쿼리로도
+ * 온다. responseBody도 대상이다 — 로그인 응답의 accessToken처럼 민감값은
+ * 응답으로도 나간다.
  */
 const SENSITIVE_LOG_KEYS = [
   'password',
@@ -47,14 +49,18 @@ export class PinoLoggerService implements LoggerService {
         // 레벨을 내보내며, 필터 요구가 생기면 그때 환경변수로 뺀다.
         level: 'trace',
         redact: {
-          // body·query 각각 바로 아래와 한 단계 중첩까지 가린다. 더 깊은
-          // 중첩은 fast-redact 와일드카드가 단계마다 경로를 요구해 상한을
-          // 정해야 하는데, 이 API의 body는 평평한 DTO이고 query도 Express
-          // 확장 파서의 한 단계 중첩(`?auth[token]=…`)까지면 전부 덮는다.
-          paths: ['body', 'query'].flatMap((field) =>
+          // body·query·responseBody 각각 바로 아래와 와일드카드 두 단계까지
+          // 가린다. 두 단계인 이유는 배열 응답 때문이다 — 배열 인덱스가
+          // 와일드카드 한 단계를 소비해, `*` 하나로는 목록 응답
+          // `[{ auth: { token } }]`의 중첩 키가 원문으로 샌다(실측). 더 깊은
+          // 중첩(배열 요소의 두 단계 중첩부터)은 fast-redact가 단계마다 경로를
+          // 요구해 상한이 필요하고, 이 API의 DTO 깊이에서는 여기까지면 덮는다.
+          // 경로 수(72개)의 비용은 로그 1건당 약 19µs로 실측돼 무시했다.
+          paths: ['body', 'query', 'responseBody'].flatMap((field) =>
             SENSITIVE_LOG_KEYS.flatMap((key) => [
               `${field}.${key}`,
               `${field}.*.${key}`,
+              `${field}.*.*.${key}`,
             ]),
           ),
           censor: '[REDACTED]',

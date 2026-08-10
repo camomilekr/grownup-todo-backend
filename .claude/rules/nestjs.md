@@ -100,7 +100,7 @@ app.useGlobalPipes(
 private readonly logger = new Logger(TodosService.name);
 ```
 
-**요청 본문·쿼리는 민감 키를 redact 처리한 뒤에만 로그에 남긴다. 토큰·비밀번호는 어떤 경우에도 남기지 않는다.** redact는 호출 지점이 아니라 로거 출구(`src/logging/pino-logger.service.ts`의 pino `redact` 설정) 한 곳에서 강제한다 — 새 민감 필드가 생기면 그곳의 `SENSITIVE_LOG_KEYS`에 추가한다. redact는 부분 문자열을 가리지 못하므로 **쿼리 문자열이 포함된 URL 원문을 로그 필드에 넣지 마라** — 경로만 남기고 쿼리는 구조화된 필드로 넘긴다.
+**요청 본문·쿼리·응답 본문은 민감 키를 redact 처리한 뒤에만 로그에 남긴다. 토큰·비밀번호는 어떤 경우에도 남기지 않는다** — 로그인 응답의 accessToken처럼 응답으로 나가는 민감값도 대상이다. redact는 호출 지점이 아니라 로거 출구(`src/logging/pino-logger.service.ts`의 pino `redact` 설정) 한 곳에서 강제한다 — 새 민감 필드가 생기면 그곳의 `SENSITIVE_LOG_KEYS`에 추가한다. redact는 부분 문자열을 가리지 못하므로 **쿼리 문자열이 포함된 URL 원문을 로그 필드에 넣지 마라** — 경로만 남기고 쿼리는 구조화된 필드로 넘긴다.
 
 ## 테스트
 

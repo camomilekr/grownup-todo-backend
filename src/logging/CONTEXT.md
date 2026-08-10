@@ -11,7 +11,7 @@ pino 기반 구조화 로깅을 담는다. 도메인 코드는 pino를 모른다
 | 파일명 | 역할 |
 |--------|------|
 | `pino-logger.service.ts` | pino를 NestJS `LoggerService`에 맞춘 어댑터. 레벨 매핑(`log`→info, `verbose`→trace, `fatal`→fatal)과 민감 키 redact를 담당 |
-| `request-logging.middleware.ts` | 요청 수신·응답 완료를 info 2건으로 남긴다 — method, url(쿼리를 뗀 경로), query, body, 상태 코드, 수신·응답 시각, 소요 시간(ms) |
+| `request-logging.middleware.ts` | 요청 수신·응답 완료를 info 2건으로 남긴다 — method, url(쿼리를 뗀 경로), query, body(요청 본문), responseBody(응답 본문, 응답 로그에만), 상태 코드, 수신·응답 시각, 소요 시간(ms) |
 | `logging.module.ts` | `PinoLoggerService` 등록·export. `main.ts`가 `app.get()`으로 꺼낸다 |
 | `process-error-handlers.ts` | `uncaughtException`·`unhandledRejection`을 fatal로 남기고 프로세스를 살려 두는 등록 함수 |
 
@@ -19,7 +19,9 @@ pino 기반 구조화 로깅을 담는다. 도메인 코드는 pino를 모른다
 
 **앱 로거 등록은 `main.ts` 두 줄이 한 쌍이다.** `NestFactory.create(AppModule, { bufferLogs: true })` + `app.useLogger(app.get(PinoLoggerService))` — `bufferLogs`가 없으면 DI 컨테이너가 서기 전의 부팅 로그만 Nest 기본 포맷으로 갈라진다. 이 배선은 `bootstrap()`에 있어 테스트가 지나지 않는다(`src/common/CONTEXT.md`의 같은 문제) — e2e는 `createNestApplication()`으로 부트해 `useLogger`를 거치지 않으므로, **Nest `Logger`를 경유하는 로그(부팅 로그, `PrismaService`의 커넥션 로그 등)는 e2e 출력에 pino JSON으로 나오지 않는다.** 반면 `RequestLoggingMiddleware`는 `PinoLoggerService`를 의존성 주입으로 직접 받아 stdout에 쓰므로, **요청·응답 로그는 e2e 출력에도 pino JSON으로 나온다**(실측) — e2e 출력에 JSON 줄이 섞여 있어도 이상이 아니다.
 
-**민감 키 redact는 로거 출구 한 곳에서 강제한다.** `body`·`query` 아래의 `SENSITIVE_LOG_KEYS`를 `[REDACTED]`로 가린다 — 값을 넘기는 호출 지점마다 가리게 하면 빠뜨린 곳이 생긴다. query도 대상인 이유는 `/password-reset?token=…`처럼 민감값이 쿼리로도 오기 때문이다. 깊이는 각 필드 바로 아래와 한 단계 중첩까지다(fast-redact 와일드카드가 단계마다 경로를 요구해 상한이 필요하고, 이 API의 body는 평평한 DTO, query는 Express 확장 파서의 한 단계 중첩까지다). **redact는 부분 문자열을 가리지 못한다**(실측) — 그래서 미들웨어의 url 필드는 쿼리 문자열을 뗀 경로만 담는다. URL 원문을 통째로 로그 필드에 넣지 마라.
+**민감 키 redact는 로거 출구 한 곳에서 강제한다.** `body`·`query`·`responseBody` 아래의 `SENSITIVE_LOG_KEYS`를 `[REDACTED]`로 가린다 — 값을 넘기는 호출 지점마다 가리게 하면 빠뜨린 곳이 생긴다. query도 대상인 이유는 `/password-reset?token=…`처럼 민감값이 쿼리로도 오기 때문이고, responseBody도 대상인 이유는 로그인 응답의 accessToken처럼 민감값이 응답으로도 나가기 때문이다. 깊이는 각 필드 바로 아래와 와일드카드 두 단계(`*.${key}`·`*.*.${key}`)까지다 — 두 단계인 이유는 배열 응답이다. **배열 인덱스가 와일드카드 한 단계를 소비해** `*` 하나로는 목록 응답 `[{ auth: { token } }]`의 중첩 키가 원문으로 샌다(리뷰 3라운드 실측). `*.*`는 객체 두 단계 중첩에도 적용된다(실측·테스트 고정). **남는 상한**: 배열 요소의 두 단계 중첩(`[{ a: { b: { token } } }]`)부터는 가려지지 않는다(실측) — fast-redact가 단계마다 경로를 요구하기 때문이고, 응답 DTO가 그만큼 깊어지면 경로 한 단계를 더하거나 재귀 마스킹으로 바꿔야 한다. 경로 수 72개의 비용은 로그 1건당 약 19µs 실측(요청당 2건 = 약 37µs)으로 무시했다. **redact는 부분 문자열을 가리지 못한다**(실측) — 그래서 미들웨어의 url 필드는 쿼리 문자열을 뗀 경로만 담는다. URL 원문을 통째로 로그 필드에 넣지 마라.
+
+**응답 본문 캡처는 `res.json`·`res.send` 래핑이다 — 인터셉터가 아니다.** 인터셉터는 컨트롤러 성공 경로만 보고 예외 필터가 내보내는 오류 응답을 놓치며, 로깅 배선이 미들웨어와 인터셉터 두 곳으로 갈라진다. **redact가 키 단위로 작동하려면 직렬화 전 객체가 필요하다** — 그래서 `res.json`에서 객체를 잡고, Express json이 내부에서 직렬화된 문자열로 send를 다시 부를 때 덮지 않는다. 컨트롤러가 JSON 문자열을 직접 만들어 반환하면(규약 위반 — DTO 객체로 반환하라) 문자열로 잡혀 redact가 못 가린다. 한계와 대가: ① `res.write` 직접 스트리밍은 잡지 못한다(이 API에 없음 — 생기면 그 라우트만 별도 처리) ② 응답 로그 한 줄이 커지는 것을 막기 위해 직렬화 10KB 상한을 두고 넘으면 생략 표기로 대체한다(Docker json-file 드라이버가 16KB 초과 줄을 분할해 JSON 파싱이 깨진다) ③ 버퍼는 크기 표기로 대체 ④ 본문 없는 응답(204 등)은 필드 자체를 넣지 않는다 — `null`·빈 문자열과 구별하기 위해서다. 필드 의미: `body`는 요청 로그·응답 로그 모두에서 **요청** 본문이고, 응답 본문은 응답 로그의 `responseBody`다.
 
 **레벨 필터가 없다(`level: 'trace'`).** Nest 기본 로거도 전부 내보낸다. 필터 요구가 생기면 환경변수로 뺀다.
 

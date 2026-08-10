@@ -137,4 +137,59 @@ describe('PinoLoggerService', () => {
     const query = lastLog().query as { auth: Record<string, unknown> };
     expect(query.auth.token).toBe('[REDACTED]');
   });
+
+  it.each([
+    'password',
+    'passwordHash',
+    'token',
+    'accessToken',
+    'refreshToken',
+    'authorization',
+    'secret',
+    'cookie',
+  ])('responseBody의 민감 키 %s를 가리고 남긴다', (key) => {
+    // 민감값은 응답으로도 나간다 — 로그인 응답의 accessToken이 그 예다
+    service.log({ responseBody: { [key]: '비밀값', email: 'a@b.c' } });
+
+    const entry = lastLog();
+    expect((entry.responseBody as Record<string, unknown>)[key]).toBe(
+      '[REDACTED]',
+    );
+    expect((entry.responseBody as Record<string, unknown>).email).toBe('a@b.c');
+  });
+
+  it('responseBody의 한 단계 중첩된 민감 키도 가린다', () => {
+    service.log({ responseBody: { auth: { accessToken: '비밀값' } } });
+
+    const responseBody = lastLog().responseBody as {
+      auth: Record<string, unknown>;
+    };
+    expect(responseBody.auth.accessToken).toBe('[REDACTED]');
+  });
+
+  it('배열 responseBody의 요소가 품은 한 단계 중첩 민감 키도 가린다', () => {
+    // 목록 엔드포인트는 배열을 반환한다 — 배열 인덱스가 와일드카드 한
+    // 단계를 소비하므로, 경로가 두 단계뿐이면 배열 요소의 중첩 키가
+    // 원문으로 샌다(리뷰 3라운드에서 실측된 구멍)
+    service.log({
+      responseBody: [{ auth: { accessToken: '비밀값' }, id: '1' }],
+    });
+
+    const responseBody = lastLog().responseBody as Array<{
+      auth: Record<string, unknown>;
+      id: string;
+    }>;
+    expect(responseBody[0].auth.accessToken).toBe('[REDACTED]');
+    expect(responseBody[0].id).toBe('1');
+  });
+
+  it('객체 responseBody의 두 단계 중첩 민감 키도 가린다', () => {
+    // 배열용 `*.*` 경로가 객체 두 단계에도 적용된다(실측) — 명세로 고정
+    service.log({ responseBody: { data: { auth: { token: '비밀값' } } } });
+
+    const responseBody = lastLog().responseBody as {
+      data: { auth: Record<string, unknown> };
+    };
+    expect(responseBody.data.auth.token).toBe('[REDACTED]');
+  });
 });
