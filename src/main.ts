@@ -23,10 +23,11 @@ async function bootstrap() {
   registerProcessErrorHandlers(app.get(PinoLoggerService));
 
   // SIGTERM·SIGINT에서 종료 훅(onModuleDestroy → HTTP 서버 close →
-  // onApplicationShutdown)을 순서대로 부르게 한다. 이것이 없으면 PrismaService가
-  // 커넥션 풀을 닫지 못하고, Supabase 풀러 쪽에 커넥션이 타임아웃까지 남는다 —
-  // 재배포를 반복하면 풀이 마른다. HTTP close가 처리 중 요청의 완료를 기다리고,
-  // DB 종료는 그 뒤의 onApplicationShutdown에 있다(k8s 정상 종료의 핵심).
+  // onApplicationShutdown)을 순서대로 부르게 한다. 이것이 없으면 커넥션 풀이
+  // 닫히지 못하고, Supabase 풀러 쪽에 커넥션이 타임아웃까지 남는다 — 재배포를
+  // 반복하면 풀이 마른다. HTTP close가 처리 중 요청의 완료를 기다리고, 자원
+  // 해제는 그 뒤 ShutdownRegistry의 onApplicationShutdown이 등록 역순으로
+  // 조율한다(k8s 정상 종료의 핵심 — `src/shutdown/CONTEXT.md`).
   app.enableShutdownHooks();
 
   await app.listen(3000);

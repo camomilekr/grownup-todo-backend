@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { ShutdownModule } from '../shutdown/shutdown.module';
 import { PrismaService } from './prisma.service';
 
 /**
@@ -10,6 +11,8 @@ import { PrismaService } from './prisma.service';
  * 걸어 두므로 여기서 다시 import하지 않는다.
  */
 @Module({
+  // ShutdownModule — 커넥션 해제를 자체 훅 대신 ShutdownRegistry 등록으로 한다
+  imports: [ShutdownModule],
   providers: [PrismaService],
   exports: [PrismaService],
 })

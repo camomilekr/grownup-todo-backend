@@ -1,6 +1,6 @@
 # CONTEXT
 
-> 마지막 업데이트: 2026-08-10
+> 마지막 업데이트: 2026-08-11
 
 ## 역할
 
@@ -10,8 +10,8 @@ Prisma 클라이언트를 NestJS DI 컨테이너와 라이프사이클에 붙인
 
 | 파일명 | 역할 |
 |--------|------|
-| `prisma.service.ts` | `PrismaClient`를 상속한 Provider. 생성자에서 어댑터를 만들고 `onModuleInit`/`onApplicationShutdown`으로 커넥션 풀을 여닫는다 |
-| `prisma.module.ts` | `PrismaService`를 등록하고 `exports`한다. `@Global()`이 아니다 |
+| `prisma.service.ts` | `PrismaClient`를 상속한 Provider. 생성자에서 어댑터를 만들고 `onModuleInit`에서 커넥션 풀을 연 뒤 해제 콜백을 `ShutdownRegistry`에 등록한다 — 자체 종료 훅이 없다 |
+| `prisma.module.ts` | `PrismaService`를 등록하고 `exports`한다. `ShutdownModule`을 import한다. `@Global()`이 아니다 |
 | `prisma.service.spec.ts` | 배선 단위 테스트. DB에 붙지 않는다 |
 
 스키마와 마이그레이션은 이 폴더가 아니라 저장소 루트의 `prisma/`에 있다. CLI 설정은 루트 `prisma.config.ts`다.
@@ -155,9 +155,9 @@ DTO 계층이 생기는 라운드가 **이 셋을 한 묶음으로** 처리해�
 
 **`DATABASE_URL`이 비면 생성자가 던진다.** `ConfigModule`의 `validate`(`src/config/env.validation.ts`)가 이미 막지만 한 겹 더 둔 이유가 있다 — 비어 있으면 node-postgres가 libpq 기본값인 localhost로 조용히 붙어서, 장애가 "데이터가 없음"으로 위장한다.
 
-**종료 훅이 `src/main.ts`의 `app.enableShutdownHooks()`에 달려 있다.** 이것을 지우면 `onApplicationShutdown`이 불리지 않아 재배포마다 풀러 쪽에 커넥션이 타임아웃까지 남는다.
+**종료 훅이 `src/main.ts`의 `app.enableShutdownHooks()`에 달려 있다.** 이것을 지우면 종료 경로 전체가 불리지 않아 재배포마다 풀러 쪽에 커넥션이 타임아웃까지 남는다.
 
-**커넥션 종료는 `onModuleDestroy`가 아니라 `onApplicationShutdown`이다(2026-08-10 이동).** 시그널 수신 시 Nest는 `onModuleDestroy` → HTTP 서버 close(처리 중 요청 완료 대기) → `onApplicationShutdown` 순서로 부른다 — `onModuleDestroy`에서 닫으면 아직 응답 중인 요청이 끊긴 DB를 만나 k8s 정상 종료가 깨진다. `onModuleDestroy`로 되돌리는 회귀는 spec의 "onModuleDestroy 훅을 갖지 않는다"가 막는다. 추후 Redis 같은 자원도 같은 패턴(`onApplicationShutdown`)으로 닫는다.
+**커넥션 해제는 자체 훅이 아니라 `ShutdownRegistry` 등록이다(2026-08-11 전환 — 그 전에는 `onApplicationShutdown` 직접 구현, 처음에는 `onModuleDestroy`였다).** `onModuleInit`에서 `$connect()` **성공 후** `register('postgres', () => this.$disconnect())` 한 줄로 끝난다 — 연 적 없는 자원을 해제 대상에 넣지 않기 위해 성공 후다. 코디네이터의 훅은 HTTP 서버 close(처리 중 요청 완료 대기) **뒤에** 불리므로 응답 중인 요청이 끊긴 DB를 만나지 않고, 역순 해제·오류 격리·타임아웃·멱등은 코디네이터가 보장한다(`src/shutdown/CONTEXT.md`). 자체 훅(`onModuleDestroy`·`onApplicationShutdown`)이 되살아나는 회귀는 spec의 "자체 종료 훅을 갖지 않는다"가 존재 자체로 막는다. 추후 Redis 같은 자원도 같은 패턴(획득 성공 직후 `register`)을 쓴다. "커넥션 풀을 닫았다" 로그는 사라졌다 — 코디네이터의 "postgres 해제 시작/완료" 로그가 대신한다.
 
 ## 의존성
 
