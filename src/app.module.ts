@@ -1,9 +1,17 @@
-import { Module } from '@nestjs/common';
+import {
+  MiddlewareConsumer,
+  Module,
+  NestModule,
+  RequestMethod,
+} from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { BigIntJsonModule } from './common/bigint-json.module';
 import { validateEnv } from './config/env.validation';
+import { HealthModule } from './health/health.module';
+import { LoggingModule } from './logging/logging.module';
+import { RequestLoggingMiddleware } from './logging/request-logging.middleware';
 import { PrismaModule } from './prisma/prisma.module';
 import { TodosModule } from './todos/todos.module';
 
@@ -21,10 +29,21 @@ import { TodosModule } from './todos/todos.module';
     // 두는 이유는 테스트가 `main.ts`를 거치지 않기 때문이다 —
     // `src/common/bigint-json.module.ts` 주석에 근거가 있다.
     BigIntJsonModule,
+    HealthModule,
+    LoggingModule,
     PrismaModule,
     TodosModule,
   ],
   controllers: [AppController],
   providers: [AppService],
 })
-export class AppModule {}
+export class AppModule implements NestModule {
+  configure(consumer: MiddlewareConsumer): void {
+    // 요청·응답 로깅을 전역으로 건다. `/api/ping`만 제외한다 — k8s 프로브가
+    // 수 초마다 때려서, 남기면 로그가 프로브 기록에 잠긴다.
+    consumer
+      .apply(RequestLoggingMiddleware)
+      .exclude({ path: 'api/ping', method: RequestMethod.GET })
+      .forRoutes('*');
+  }
+}
