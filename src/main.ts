@@ -1,4 +1,6 @@
+import { ConfigService } from '@nestjs/config';
 import { NestFactory } from '@nestjs/core';
+import { setupApp } from './app-setup';
 import { AppModule } from './app.module';
 import { PinoLoggerService } from './logging/pino-logger.service';
 import { registerProcessErrorHandlers } from './logging/process-error-handlers';
@@ -22,6 +24,10 @@ async function bootstrap() {
   // `src/logging/process-error-handlers.ts` 주석에 있다.
   registerProcessErrorHandlers(app.get(PinoLoggerService));
 
+  // HTTP 공통 설정(전역 prefix). e2e와 같은 함수를 부른다 — 여기 직접 쓰면
+  // 테스트가 보는 경로와 실제 경로가 갈린다(`src/app-setup.ts`).
+  setupApp(app);
+
   // SIGTERM·SIGINT에서 종료 훅(onModuleDestroy → HTTP 서버 close →
   // onApplicationShutdown)을 순서대로 부르게 한다. 이것이 없으면 커넥션 풀이
   // 닫히지 못하고, Supabase 풀러 쪽에 커넥션이 타임아웃까지 남는다 — 재배포를
@@ -30,6 +36,11 @@ async function bootstrap() {
   // 조율한다(k8s 정상 종료의 핵심 — `src/shutdown/CONTEXT.md`).
   app.enableShutdownHooks();
 
-  await app.listen(3000);
+  // 리슨 포트는 환경변수 PORT다. 기본값(4080)과 형식 검증은 여기가 아니라
+  // `src/config/env.validation.ts`에 있다 — 값이 틀렸을 때 리슨 시점이 아니라
+  // 부팅 시점에 세우기 위해서다. 검증을 지난 값은 이미 number이므로
+  // `getOrThrow`가 반드시 값을 돌려준다(없으면 부팅이 여기 오지 못한다).
+  const port = app.get(ConfigService).getOrThrow<number>('PORT');
+  await app.listen(port);
 }
 bootstrap();

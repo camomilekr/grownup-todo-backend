@@ -1,6 +1,6 @@
 # CONTEXT
 
-> 마지막 업데이트: 2026-08-11
+> 마지막 업데이트: 2026-08-12
 
 ## 역할
 
@@ -25,7 +25,7 @@ pino 기반 구조화 로깅을 담는다. 도메인 코드는 pino를 모른다
 
 **레벨 필터가 없다(`level: 'trace'`).** Nest 기본 로거도 전부 내보낸다. 필터 요구가 생기면 환경변수로 뺀다.
 
-**요청 로깅 배선은 `AppModule.configure`에 있다.** 전역(`forRoutes('*')`)에 걸되 `/api/ping`만 exclude한다 — k8s 프로브가 수 초마다 때려서, 남기면 로그가 프로브 기록에 잠긴다. ping 경로를 바꾸면 그 exclude도 함께 바꿔야 한다. 미들웨어는 body를 가리지 않고 그대로 넘긴다 — 가리는 것은 로거 출구의 redact다. 응답 로그는 `close`가 아니라 `finish` 이벤트에 건다(close는 전송 완료 전 커넥션이 끊겨도 발생한다). URL fragment(`#…`)는 브라우저가 서버로 보내지 않아 로그 항목에 없다(2026-08-10 사용자 확정).
+**요청 로깅 배선은 `AppModule.configure`에 있다.** 전역(`forRoutes('*')`)에 걸되 헬스 프로브(`/api/v1/ping`)만 exclude한다 — k8s 프로브가 수 초마다 때려서, 남기면 로그가 프로브 기록에 잠긴다. 경로 문자열은 `src/health/health.controller.ts`의 `HEALTH_PING_PATH`를 가져다 쓴다 — 양쪽에 따로 적으면 한쪽만 바뀌었을 때 제외가 조용히 풀린다. **규칙은 하나다 — `forRoutes`든 `exclude`든 전역 prefix(`api/v1`)를 직접 쓰지 않는다.** Nest가 양쪽 모두에 붙여 준다(`forRoutes`는 `RouteInfoPathExtractor.extractPathsFrom`, `exclude`는 `MiddlewareBuilder.ConfigProxy.exclude` → `extractPathFrom`, @nestjs/core 10.4.22). exclude 쪽은 비교 대상이 prefix가 포함된 요청 URL 원문이라 직접 붙여야 할 것처럼 읽히지만 그렇지 않다 — `'api/v1/ping'`이라고 쓰면 `/api/v1/api/v1/ping`이 되어 어떤 요청과도 맞지 않고, 제외가 조용히 풀린다. 최소 앱을 띄워 실측했고(2026-08-12), 회귀는 `test/health.e2e-spec.ts`의 '요청 로깅 제외' 두 건이 잡는다(잘못된 배선에서 실제로 실패하는 것을 확인했다). 미들웨어는 body를 가리지 않고 그대로 넘긴다 — 가리는 것은 로거 출구의 redact다. 응답 로그는 `close`가 아니라 `finish` 이벤트에 건다(close는 전송 완료 전 커넥션이 끊겨도 발생한다). URL fragment(`#…`)는 브라우저가 서버로 보내지 않아 로그 항목에 없다(2026-08-10 사용자 확정).
 
 **프로세스 오류 핸들러는 DI Provider가 아니라 함수다.** 프로세스 전역(리스너)을 만지는 배선이라 Nest 라이프사이클에 묶으면 앱 인스턴스가 여럿일 때(테스트) 리스너가 중복 등록된다 — `main.ts`가 부팅 시 한 번 부른다. 리스너를 다는 것만으로 Node 기본 동작(uncaughtException 즉시 종료)이 대체되며, 프로세스를 살리는 것은 사용자 명시 요청이다. **등록 함수는 해제 함수를 반환한다** — 프로세스 전역을 만지는 spec은 그것으로 반드시 원상 복구한다(`src/common/CONTEXT.md`의 프로토타입 규칙과 같은 원리). spec은 `process.emit`으로 발화시키지 않는다 — jest 자체 리스너까지 불려 러너가 오작동하므로, 등록 전후 리스너 차집합으로 우리 리스너만 직접 부른다.
 

@@ -3,6 +3,7 @@ import { PrismaModule } from '../prisma/prisma.module';
 import { UsersModule } from '../users/users.module';
 import { TodoHistoriesRepository } from './todo-histories.repository';
 import { TodoTemplatesRepository } from './todo-templates.repository';
+import { TodosController } from './todos.controller';
 import { TodosService } from './todos.service';
 
 /**
@@ -19,6 +20,7 @@ import { TodosService } from './todos.service';
  */
 @Module({
   imports: [PrismaModule, UsersModule],
+  controllers: [TodosController],
   providers: [TodoTemplatesRepository, TodoHistoriesRepository, TodosService],
   exports: [TodosService],
 })

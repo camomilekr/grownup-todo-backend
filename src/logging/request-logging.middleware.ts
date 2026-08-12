@@ -58,7 +58,7 @@ function summarizeResponseBody(body: unknown): unknown {
  * URL fragment(`#…`)는 항목에 없다 — 브라우저가 서버로 보내지 않아 여기서는
  * 존재하지 않는다(2026-08-10 사용자 확정).
  *
- * `/api/ping`은 이 미들웨어를 타지 않는다 — `AppModule.configure`의 exclude.
+ * `/api/v1/ping`은 이 미들웨어를 타지 않는다 — `AppModule.configure`의 exclude.
  */
 @Injectable()
 export class RequestLoggingMiddleware implements NestMiddleware {
