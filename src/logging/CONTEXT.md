@@ -27,6 +27,20 @@ pino 기반 구조화 로깅을 담는다. 도메인 코드는 pino를 모른다
 
 **요청 로깅 배선은 `AppModule.configure`에 있다.** 전역(`forRoutes('*')`)에 걸되 헬스 프로브 둘(`/api/v1/ping`·`/api/v1/ready`)을 exclude한다 — k8s 프로브가 수 초마다 때려서, 남기면 로그가 프로브 기록에 잠긴다. 경로 문자열은 `src/health/health.controller.ts`의 `HEALTH_PING_PATH`·`HEALTH_READY_PATH`를 가져다 쓴다 — 양쪽에 따로 적으면 한쪽만 바뀌었을 때 제외가 조용히 풀린다. **규칙은 하나다 — `forRoutes`든 `exclude`든 전역 prefix(`api/v1`)를 직접 쓰지 않는다.** Nest가 양쪽 모두에 붙여 준다(`forRoutes`는 `RouteInfoPathExtractor.extractPathsFrom`, `exclude`는 `MiddlewareBuilder.ConfigProxy.exclude` → `extractPathFrom`, @nestjs/core 10.4.22). exclude 쪽은 비교 대상이 prefix가 포함된 요청 URL 원문이라 직접 붙여야 할 것처럼 읽히지만 그렇지 않다 — `'api/v1/ping'`이라고 쓰면 `/api/v1/api/v1/ping`이 되어 어떤 요청과도 맞지 않고, 제외가 조용히 풀린다. 최소 앱을 띄워 실측했고(2026-08-12), 회귀는 `test/health.e2e-spec.ts`의 '요청 로깅 제외' 두 건이 잡는다(잘못된 배선에서 실제로 실패하는 것을 확인했다). 미들웨어는 body를 가리지 않고 그대로 넘긴다 — 가리는 것은 로거 출구의 redact다. 응답 로그는 `close`가 아니라 `finish` 이벤트에 건다(close는 전송 완료 전 커넥션이 끊겨도 발생한다). URL fragment(`#…`)는 브라우저가 서버로 보내지 않아 로그 항목에 없다(2026-08-10 사용자 확정).
 
+**"프로세스를 살려 둔다" 정책은 런타임에만 적용된다 — 부팅 실패는 종료 코드 1로 죽는다(2026-08-12 사용자 확정).** 정책이 뒤집힌 것이 아니라 **적용 구간이 다르다.**
+
+| 구간 | 무엇이 일어나면 | 어떻게 하는가 | 왜 |
+|---|---|---|---|
+| 기동 후(런타임) | `uncaughtException`·`unhandledRejection` | fatal 로그 후 **살려 둔다** | 요청 하나의 실패로 이미 처리 중인 다른 요청까지 끊지 않는다(사용자 명시 요청) |
+| 부팅 중 — 컨테이너 생성(`NestFactory.create`) | 환경변수 검증 실패 등 | **Nest가** fatal 로그 후 `process.exit(1)` | 우리 코드가 개입하지 않아도 이미 목표 상태다(아래 참조) |
+| 부팅 중 — 그 이후 | 리슨 실패 | `bootstrap().catch()`가 fatal 로그 후 **`process.exit(1)`** | 살려 두면 배포 실패가 종료 코드 0으로 위장된다 |
+
+**`bootstrap().catch()`는 컨테이너 생성 실패를 잡지 않는다.** `ConfigModule.forRoot`가 `async`라 검증 실패가 모듈 로드 시점의 동기 throw가 아니라 **거절된 Promise**가 되고, Nest의 `ExceptionsZone`이 `exceptionHandler.handle` → `Logger.flush()` → `teardown`(기본값 `() => process.exit(1)`, `abortOnError` 기본 true)까지 스스로 끝낸다(@nestjs/core 10.4.22 `errors/exceptions-zone.js`). `SHUTDOWN_DRAIN_DELAY_MS=60001`로 띄우면 종료 코드는 `1`이지만 `[Bootstrap] 부팅에 실패해 프로세스를 종료한다` 줄이 **없고** Nest의 `[ExceptionHandler]` 줄만 남는 것으로 확인했다(실측 2026-08-12). 종료 코드와 근본 원인 로그를 Nest가 대신 보장하므로 목표는 두 경로 모두 달성돼 있다 — 다만 **그 경로에서 우리 fatal 줄을 찾지 마라.**
+
+부팅 실패(리슨 실패)를 살려 두면 `bootstrap()`이 거절한 Promise가 unhandledRejection으로 흘러 런타임 핸들러에 잡히고, 리슨을 못 해 이벤트 루프에 남은 일이 없으므로 **종료 코드 0으로 조용히 끝난다**(2026-08-12 포트 충돌로 실측 — `bootstrap()`만 부르던 상태에서 `echo $?`가 `0`이었다). k8s는 종료 코드로 재시작을 판단하므로 열지도 못한 서버가 "정상 종료"로 기록된다. 그래서 `bootstrap().catch()`가 런타임 핸들러보다 **먼저** 그 거절을 가져간다 — 이 순서가 두 정책이 부딪히지 않는 이유다.
+
+**부팅 실패 경로에는 `app.flushLogs()`가 필요하다.** `bufferLogs: true`의 버퍼를 Nest가 비우는 지점은 **리슨 성공 시점 하나뿐이다**(`nest-application.js`의 `listen()`이 `flushLogs()`를 부른다 — 10.4.22 소스 확인). 리슨 전에 실패하면 부팅 로그도 fatal 로그도 버퍼에 갇힌 채 사라진다 — 실측에서 로그 파일이 **0바이트**였다(2026-08-12). 그래서 `main.ts`가 `listen()`을 try/catch로 감싸 실패 시 flush한 뒤 다시 던진다. `flushLogsOnOverride()`를 쓰지 않은 이유는 그 메서드가 `INestApplication` 인터페이스에 없어 타입 검사가 막기 때문이다(`flushLogs()`만 인터페이스에 있다).
+
 **프로세스 오류 핸들러는 DI Provider가 아니라 함수다.** 프로세스 전역(리스너)을 만지는 배선이라 Nest 라이프사이클에 묶으면 앱 인스턴스가 여럿일 때(테스트) 리스너가 중복 등록된다 — `main.ts`가 부팅 시 한 번 부른다. 리스너를 다는 것만으로 Node 기본 동작(uncaughtException 즉시 종료)이 대체되며, 프로세스를 살리는 것은 사용자 명시 요청이다. **등록 함수는 해제 함수를 반환한다** — 프로세스 전역을 만지는 spec은 그것으로 반드시 원상 복구한다(`src/common/CONTEXT.md`의 프로토타입 규칙과 같은 원리). spec은 `process.emit`으로 발화시키지 않는다 — jest 자체 리스너까지 불려 러너가 오작동하므로, 등록 전후 리스너 차집합으로 우리 리스너만 직접 부른다.
 
 **기본 목적지는 stdout **동기 쓰기**다(`pino.destination({ sync: true })`, 2026-08-11).** pino 기본값(비동기 SonicBoom)은 flush를 process 'exit' 이벤트에만 등록하는데(소스 확인), **Nest의 시그널 종료는 훅 완료 후 시그널 재발신으로 죽어 'exit'가 불리지 않는다** — 종료 직전의 로그(`ShutdownRegistry`의 "해제 완료" 등)가 유실될 수 있다. 유실은 플랫폼·타이밍 의존이다 — macOS·stdout 파일 리다이렉트·SIGTERM 조건에서 반복 재현됐고, 파이프 조건에서는 재현되지 않았다는 관찰도 있다. 동기 쓰기의 처리량 비용은 이 규모에서 무시하고, 종료 로그의 유실 가능성 쪽을 더 비싸게 봤다.
