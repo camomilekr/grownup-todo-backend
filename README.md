@@ -58,6 +58,7 @@ cp .env.example .env
 | `DATABASE_URL` | 애플리케이션 런타임용. Supabase 트랜잭션 모드 풀러(포트 6543). 없으면 부팅이 실패한다 |
 | `DIRECT_URL` | Prisma CLI(Command Line Interface, 명령줄 도구)용. 세션 모드 풀러(포트 5432). 마이그레이션·studio가 쓴다 |
 | `PORT` | HTTP 리슨 포트. 비워 두면 4080이다. 1~65535 범위의 10진수 정수만 받고, 그 밖의 값이면 부팅이 실패한다 |
+| `SHUTDOWN_DRAIN_DELAY_MS` | 종료(SIGTERM) 후 HTTP 서버를 닫기까지 기다리는 시간(ms). 비워 두면 5000이다. 0~60000 범위의 10진수 정수만 받는다 |
 
 ## 실행
 

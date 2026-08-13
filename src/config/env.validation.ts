@@ -22,52 +22,84 @@ const MIN_PORT = 1;
 const MAX_PORT = 65535;
 
 /**
+ * 종료 시작 후 HTTP 서버를 닫기까지 기다리는 시간의 기본값.
+ *
+ * k8s가 파드를 지울 때 "엔드포인트에서 제거"와 "컨테이너에 SIGTERM 전달"은
+ * 병렬로 일어나, 시그널을 받은 뒤에도 잠시 새 요청이 들어온다. 그 사이에
+ * HTTP 서버를 닫으면 커넥션 거절이 된다 — 이 대기가 그 창을 덮는다.
+ *
+ * 매니페스트가 아직 없어 `preStop` 훅에 기댈 수 없으므로, 앱 스스로 드레인이
+ * 되는 값을 기본값으로 둔다(사용자 확정 2026-08-12).
+ */
+const DEFAULT_SHUTDOWN_DRAIN_DELAY_MS = 5_000;
+
+/**
+ * 드레인 대기의 상한. 막는 것은 **자릿수를 하나 더 찍은 오타**(`5000`을
+ * `500000`으로 적는 류)까지다 — 그 값이면 대기만으로 500초라 SIGKILL이
+ * 드레인 중간을 자르고 자원 해제가 통째로 스킵된다.
+ *
+ * **이 상한을 통과한 값이 `terminationGracePeriodSeconds`와 양립한다는 뜻은
+ * 아니다.** 상한값 60초에 자원 해제 예산(`DISPOSE_TIMEOUT_MS` 10초)만 더해도
+ * k8s 기본 유예 30초를 이미 넘는다. 대기 시간과 유예 기간을 실제로 맞추는 것은
+ * 매니페스트를 쓰는 쪽의 몫이고, 맞춰야 할 조건은
+ * `src/health/CONTEXT.md`의 "매니페스트가 만족해야 할 조건"에 있다.
+ */
+const MAX_SHUTDOWN_DRAIN_DELAY_MS = 60_000;
+
+/**
  * 10진수 숫자만으로 이루어진 표기. `Number()`에 그대로 넘기지 않기 위한 관문이다
  * — `Number()`는 `0x10`(=16)·`8e3`(=8000)·`+8080`까지 조용히 받아 주는데,
- * 문서와 오류 메시지는 "1~65535 범위의 정수"를 약속한다. `PORT=0x10`을 적은
- * 사람이 오류도 받지 못하고 16번 포트로 떴다는 사실도 모르는 것이 가장 나쁘다.
+ * 문서와 오류 메시지는 "10진수 정수"를 약속한다. `PORT=0x10`을 적은 사람이
+ * 오류도 받지 못하고 16번 포트로 떴다는 사실도 모르는 것이 가장 나쁘다.
  */
 const DECIMAL_INTEGER = /^\d+$/;
 
 export type ValidatedEnv = Record<string, unknown> & {
   DATABASE_URL: string;
   PORT: number;
+  SHUTDOWN_DRAIN_DELAY_MS: number;
 };
 
+/** 정수 환경변수 하나의 명세. 이름을 담는 이유는 오류 메시지에 싣기 위해서다 */
+interface IntegerEnvSpec {
+  name: string;
+  defaultValue: number;
+  min: number;
+  max: number;
+}
+
 /**
- * `PORT`를 숫자로 정규화한다. 값을 읽는 쪽이 아니라 여기서 바꾸는 이유는
- * `process.env`의 값이 언제나 문자열이라, 변환을 소비 지점마다 반복하면
- * 한 곳이 빠졌을 때 문자열이 그대로 새기 때문이다.
+ * 정수 환경변수를 검증하고 숫자로 정규화한다. 값을 읽는 쪽이 아니라 여기서
+ * 바꾸는 이유는 `process.env`의 값이 언제나 문자열이라, 변환을 소비 지점마다
+ * 반복하면 한 곳이 빠졌을 때 문자열이 그대로 새기 때문이다.
+ *
+ * 값이 비밀값이 아니라는 전제로 오류 메시지에 값을 싣는다 — 포트 번호·대기
+ * 시간이 그렇다. `DATABASE_URL`처럼 비밀값을 담는 변수는 이 헬퍼를 쓰지 않는다.
  */
-function parsePort(rawPort: unknown): number {
-  // 값이 없거나 비어 있으면 기본값이다. `.env.example`이 `PORT=`로 비워 두고
-  // 있어 빈 문자열이 실제로 들어온다 — 오류로 보면 예시를 그대로 복사한
-  // `.env`가 부팅을 막는다
-  if (rawPort === undefined || rawPort === null) {
-    return DEFAULT_PORT;
+function parseIntegerEnv(rawValue: unknown, spec: IntegerEnvSpec): number {
+  // 값이 없거나 비어 있으면 기본값이다. `.env.example`이 키를 값 없이
+  // 나열하고 있어 빈 문자열이 실제로 들어온다 — 오류로 보면 예시를 그대로
+  // 복사한 `.env`가 부팅을 막는다
+  if (rawValue === undefined || rawValue === null) {
+    return spec.defaultValue;
   }
 
-  // 값은 문자열로만 온다(`process.env`). 앞뒤 공백은 손으로 편집하다 남기
-  // 쉬우므로 떼고 본다
-  const trimmed = String(rawPort).trim();
+  // 앞뒤 공백은 손으로 편집하다 남기 쉬우므로 떼고 본다
+  const trimmed = String(rawValue).trim();
   if (trimmed === '') {
-    return DEFAULT_PORT;
+    return spec.defaultValue;
   }
 
-  // 포트 번호는 비밀값이 아니므로 메시지에 실어 준다 — DATABASE_URL과 달리
-  // 값을 보여 주는 편이 원인을 훨씬 빨리 좁힌다
-  const port = Number(trimmed);
-  if (
-    !DECIMAL_INTEGER.test(trimmed) ||
-    !Number.isInteger(port) ||
-    port < MIN_PORT ||
-    port > MAX_PORT
-  ) {
+  // `Number.isInteger`를 함께 보지 않는다 — `/^\d+$/`를 통과한 값은 항상
+  // 정수라 판정에 관여하지 못하는 조건이었다. 표기가 10진수 정수인지는
+  // 정규식이, 크기는 범위 비교가 각각 혼자 판정한다
+  const value = Number(trimmed);
+  if (!DECIMAL_INTEGER.test(trimmed) || value < spec.min || value > spec.max) {
     throw new Error(
-      `환경변수 PORT가 ${MIN_PORT}~${MAX_PORT} 범위의 10진수 정수가 아니다: ${trimmed}`,
+      `환경변수 ${spec.name}가 ${spec.min}~${spec.max} 범위의 10진수 정수가 아니다: ${trimmed}`,
     );
   }
-  return port;
+  return value;
 }
 
 export function validateEnv(config: Record<string, unknown>): ValidatedEnv {
@@ -95,6 +127,22 @@ export function validateEnv(config: Record<string, unknown>): ValidatedEnv {
   return {
     ...config,
     DATABASE_URL: databaseUrl,
-    PORT: parsePort(config['PORT']),
+    PORT: parseIntegerEnv(config['PORT'], {
+      name: 'PORT',
+      defaultValue: DEFAULT_PORT,
+      min: MIN_PORT,
+      max: MAX_PORT,
+    }),
+    SHUTDOWN_DRAIN_DELAY_MS: parseIntegerEnv(
+      config['SHUTDOWN_DRAIN_DELAY_MS'],
+      {
+        name: 'SHUTDOWN_DRAIN_DELAY_MS',
+        defaultValue: DEFAULT_SHUTDOWN_DRAIN_DELAY_MS,
+        // 0은 유효한 값이다 — 매니페스트가 `preStop: sleep`으로 대기를
+        // 대신하기로 하면 앱 내부 대기를 꺼야 한다(`PORT`와 다른 점)
+        min: 0,
+        max: MAX_SHUTDOWN_DRAIN_DELAY_MS,
+      },
+    ),
   };
 }

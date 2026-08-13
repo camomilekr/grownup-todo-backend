@@ -89,6 +89,17 @@ describe('validateEnv', () => {
     });
 
     it.each([
+      ['하한', '1', 1],
+      ['상한', '65535', 65535],
+    ])('%s 경계값은 받는다', (_설명, port, expected) => {
+      // 경계 **바깥**을 던지는 단정만 있으면 부등호를 한 칸 밀어도 전부
+      // 통과한다. 유효한 양 끝을 받는 것까지 함께 고정해야 범위가 잠긴다
+      expect(validateEnv({ DATABASE_URL: VALID_URL, PORT: port }).PORT).toBe(
+        expected,
+      );
+    });
+
+    it.each([
       ['정수가 아니다', '8080.5'],
       ['숫자가 아니다', 'http'],
       ['0이다', '0'],
@@ -104,6 +115,63 @@ describe('validateEnv', () => {
       expect(() =>
         validateEnv({ DATABASE_URL: VALID_URL, PORT: port }),
       ).toThrow(/PORT/);
+    });
+  });
+
+  describe('SHUTDOWN_DRAIN_DELAY_MS', () => {
+    it('없으면 기본값 5000이다', () => {
+      // 매니페스트가 없어도 드레인이 동작하는 값이다(사용자 확정 2026-08-12)
+      expect(
+        validateEnv({ DATABASE_URL: VALID_URL }).SHUTDOWN_DRAIN_DELAY_MS,
+      ).toBe(5000);
+    });
+
+    it.each([
+      ['빈 문자열', ''],
+      ['공백뿐인 문자열', '  '],
+      ['undefined', undefined],
+    ])('%s면 기본값 5000이다', (_설명, delay) => {
+      expect(
+        validateEnv({ DATABASE_URL: VALID_URL, SHUTDOWN_DRAIN_DELAY_MS: delay })
+          .SHUTDOWN_DRAIN_DELAY_MS,
+      ).toBe(5000);
+    });
+
+    it('0을 받는다', () => {
+      // `PORT`와 달리 0이 유효한 값이다 — 매니페스트가 `preStop: sleep`으로
+      // 대기를 대신하기로 하면 앱 내부 대기를 꺼야 한다
+      expect(
+        validateEnv({ DATABASE_URL: VALID_URL, SHUTDOWN_DRAIN_DELAY_MS: '0' })
+          .SHUTDOWN_DRAIN_DELAY_MS,
+      ).toBe(0);
+    });
+
+    it('상한 60000을 받는다', () => {
+      expect(
+        validateEnv({
+          DATABASE_URL: VALID_URL,
+          SHUTDOWN_DRAIN_DELAY_MS: '60000',
+        }).SHUTDOWN_DRAIN_DELAY_MS,
+      ).toBe(60000);
+    });
+
+    it.each([
+      ['음수다', '-1'],
+      ['소수다', '1500.5'],
+      ['숫자가 아니다', 'soon'],
+      ['16진수 표기다', '0x10'],
+      ['지수 표기다', '5e3'],
+      ['상한 60000을 넘는다', '60001'],
+    ])('SHUTDOWN_DRAIN_DELAY_MS가 %s면 던진다', (_설명, delay) => {
+      // 상한을 두는 이유는 대기 + 자원 해제 예산이
+      // `terminationGracePeriodSeconds`를 넘으면 k8s가 SIGKILL로 잘라
+      // 드레인도 자원 해제도 끝내지 못하기 때문이다
+      expect(() =>
+        validateEnv({
+          DATABASE_URL: VALID_URL,
+          SHUTDOWN_DRAIN_DELAY_MS: delay,
+        }),
+      ).toThrow(/SHUTDOWN_DRAIN_DELAY_MS/);
     });
   });
 });
