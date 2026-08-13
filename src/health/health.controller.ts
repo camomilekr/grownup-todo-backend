@@ -1,13 +1,17 @@
 import { Controller, Get } from '@nestjs/common';
+import { ReadinessService } from './readiness.service';
 
 /**
- * 전역 prefix 아래의 프로브 경로. 최종 노출 경로는 `/api/v1/ping`이다.
+ * liveness 프로브 경로. 최종 노출 경로는 `/api/v1/ping`이다.
  *
  * 상수로 빼 둔 이유는 `AppModule`의 요청 로깅 exclude가 **같은 경로**를
  * 가리켜야 하기 때문이다 — 양쪽에 문자열을 따로 적으면 한쪽만 바뀌었을 때
  * 프로브 요청이 조용히 로그를 채운다.
  */
 export const HEALTH_PING_PATH = 'ping';
+
+/** readiness 프로브 경로. 최종 노출 경로는 `/api/v1/ready`다 */
+export const HEALTH_READY_PATH = 'ready';
 
 /**
  * k8s liveness·readiness 프로브 대상.
@@ -21,8 +25,20 @@ export const HEALTH_PING_PATH = 'ping';
  */
 @Controller()
 export class HealthController {
+  constructor(private readonly readinessService: ReadinessService) {}
+
+  /**
+   * liveness — **종료 중에도 200이다.** 여기에 종료 판정을 넣으면 kubelet이
+   * 유예 기간 중에 컨테이너를 죽여 드레인 자체가 잘린다.
+   */
   @Get(HEALTH_PING_PATH)
   ping(): string {
     return 'pong';
+  }
+
+  /** readiness — 종료가 시작되면 Service가 503을 던진다 */
+  @Get(HEALTH_READY_PATH)
+  ready(): string {
+    return this.readinessService.check();
   }
 }

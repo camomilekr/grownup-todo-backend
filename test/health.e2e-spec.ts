@@ -4,6 +4,7 @@ import * as request from 'supertest';
 import { AppModule } from './../src/app.module';
 import { setupApp } from './../src/app-setup';
 import { PinoLoggerService } from './../src/logging/pino-logger.service';
+import { ShutdownRegistry } from './../src/shutdown/shutdown-registry.service';
 
 describe('Health (e2e)', () => {
   let app: INestApplication;
@@ -66,18 +67,68 @@ describe('Health (e2e)', () => {
     return request(app.getHttpServer()).get('/api/ping').expect(404);
   });
 
+  it('GET /api/v1/ready는 200과 문자열 ready로 응답한다', () => {
+    return request(app.getHttpServer())
+      .get('/api/v1/ready')
+      .expect(200)
+      .expect('ready');
+  });
+
+  describe('종료 드레인', () => {
+    // 컨테이너에서 꺼낸 코디네이터의 드레인 국면을 **시그널 없이** 부른다 —
+    // 시그널을 주면 실제 대기 시간만큼 테스트가 멈춘다. 종료 플래그만 세우는
+    // 것이 여기서 보려는 상태다.
+    async function 종료를_시작한다(): Promise<void> {
+      await app.get(ShutdownRegistry).beforeApplicationShutdown();
+    }
+
+    it('종료가 시작되면 readiness는 503이 된다', async () => {
+      await 종료를_시작한다();
+
+      await request(app.getHttpServer()).get('/api/v1/ready').expect(503);
+    });
+
+    // 이 단정이 이 기능의 핵심이다. liveness까지 503이 되면 kubelet이 유예
+    // 기간 중에 컨테이너를 죽여 드레인 자체가 잘린다 — 겸용 경로 하나를
+    // 503으로 바꾸는 구현과 이 구현을 가르는 지점이다.
+    it('종료가 시작돼도 liveness는 200을 유지한다', async () => {
+      await 종료를_시작한다();
+
+      await request(app.getHttpServer())
+        .get('/api/v1/ping')
+        .expect(200)
+        .expect('pong');
+    });
+
+    it('종료가 시작돼도 일반 요청은 계속 처리된다', async () => {
+      // 드레인의 목적이 이것이다 — readiness만 내리고 처리는 계속한다
+      await 종료를_시작한다();
+
+      await request(app.getHttpServer())
+        .get('/api/v1')
+        .expect(200)
+        .expect('Hello World!');
+    });
+  });
+
   describe('요청 로깅 제외', () => {
     // k8s 프로브가 수 초마다 때리므로 로그가 프로브 기록에 잠긴다. 제외가
     // 풀려도 응답은 정상이라 사람이 알아채지 못한다 — 그래서 배선을 여기서
     // 고정한다. exclude 경로에 전역 prefix를 직접 붙이면(`api/v1/ping`)
     // Nest가 한 번 더 붙여 제외가 조용히 풀리는데, 그 회귀를 이 테스트가 잡는다.
-    it('프로브 요청은 요청 로그를 남기지 않는다', async () => {
+    it('liveness 요청은 요청 로그를 남기지 않는다', async () => {
       await request(app.getHttpServer()).get('/api/v1/ping').expect(200);
 
       expect(loggedEvents).toHaveLength(0);
     });
 
-    // 위 테스트만 있으면 미들웨어가 아예 걸리지 않은 상태에서도 통과한다.
+    it('readiness 요청은 요청 로그를 남기지 않는다', async () => {
+      await request(app.getHttpServer()).get('/api/v1/ready').expect(200);
+
+      expect(loggedEvents).toHaveLength(0);
+    });
+
+    // 위 테스트들만 있으면 미들웨어가 아예 걸리지 않은 상태에서도 통과한다.
     // 프로브가 아닌 요청이 로그를 남기는 것을 함께 단정해 그 경우를 배제한다.
     it('프로브가 아닌 요청은 요청 로그를 남긴다', async () => {
       await request(app.getHttpServer()).get('/api/v1').expect(200);

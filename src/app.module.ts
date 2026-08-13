@@ -11,7 +11,10 @@ import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { BigIntJsonModule } from './common/bigint-json.module';
 import { validateEnv } from './config/env.validation';
-import { HEALTH_PING_PATH } from './health/health.controller';
+import {
+  HEALTH_PING_PATH,
+  HEALTH_READY_PATH,
+} from './health/health.controller';
 import { HealthModule } from './health/health.module';
 import { LoggingModule } from './logging/logging.module';
 import { RequestLoggingMiddleware } from './logging/request-logging.middleware';
@@ -60,8 +63,8 @@ import { TodosModule } from './todos/todos.module';
 })
 export class AppModule implements NestModule {
   configure(consumer: MiddlewareConsumer): void {
-    // 요청·응답 로깅을 전역으로 건다. 헬스 프로브 경로만 제외한다 — k8s가
-    // 수 초마다 때려서, 남기면 로그가 프로브 기록에 잠긴다.
+    // 요청·응답 로깅을 전역으로 건다. 헬스 프로브 경로 둘(liveness·readiness)
+    // 만 제외한다 — k8s가 수 초마다 때려서, 남기면 로그가 프로브 기록에 잠긴다.
     //
     // **exclude 경로에 전역 prefix(`api/v1`)를 직접 쓰지 마라.** Nest가
     // 알아서 앞에 붙인다(`MiddlewareBuilder.ConfigProxy.exclude` →
@@ -71,7 +74,10 @@ export class AppModule implements NestModule {
     // 2026-08-12 최소 앱을 띄워 실측했다.
     consumer
       .apply(RequestLoggingMiddleware)
-      .exclude({ path: HEALTH_PING_PATH, method: RequestMethod.GET })
+      .exclude(
+        { path: HEALTH_PING_PATH, method: RequestMethod.GET },
+        { path: HEALTH_READY_PATH, method: RequestMethod.GET },
+      )
       .forRoutes('*');
   }
 }
