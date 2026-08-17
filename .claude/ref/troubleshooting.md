@@ -10,6 +10,20 @@
 | `cp -Rc`가 실패한다 | APFS가 아니다. 스크립트가 `npm install`로 되돌아간다 |
 | `git worktree remove`가 느리거나 거부한다 | `node_modules`를 먼저 지우지 않았다. `worktree-drop.sh`가 순서와 재시도를 지킨다 |
 
+## 지문 스크립트 — 병합 도중에 돌리면 파일이 지워질 수 있었다
+
+**증상**: 병합 충돌을 해소한 뒤(아직 `git add`하지 않은 상태에서) `fingerprint.sh`를 돌렸다. 지문은 정상으로 보이는 값을 뱉었는데, 그 뒤 `git status`에 `DA package.json` 같은 줄이 나타났다. `git diff --cached --name-status HEAD`가 그 파일들을 `D`(삭제)로 보고했다 — **그 상태로 커밋하면 `src/main.ts`·`package.json`을 포함한 파일들이 지워진다.** 2026-08-17에 실제로 이 상태까지 갔고(4개 파일), 커밋 전에 발견해 되돌렸다.
+
+**원인**: 스크립트 안의 `git add -N .`이다. 추적되지 않는 파일을 지문에 포함시키려고 넣은 것인데, 인덱스에 **충돌 단계**(stage 1·2·3)가 남아 있는 파일에 걸리면 그 단계를 걷어내고 intent-to-add로 덮는다. 결과가 "인덱스에는 없고 작업 트리에만 있는 파일" = 삭제로 스테이징된 상태다.
+
+이 저장소 규약이 구현자에게 `git add`를 금지하므로, **병합 충돌을 해소하고 `git add`하지 않은 상태가 정상**이다. 즉 규약을 지키면 이 함정에 정확히 걸린다.
+
+**현재는 스크립트가 막는다.** 진행 중인 작업(`MERGE_HEAD`·`CHERRY_PICK_HEAD`·`REVERT_HEAD`·`rebase-merge`·`rebase-apply`)이나 인덱스에 남은 충돌 단계를 감지하면 지문을 찍지 않고 종료 코드 1로 멈춘다. **경고가 나오면 지문을 얻는 것이 목적이 아니다 — 병합을 먼저 끝내야 한다는 뜻이다.** 충돌을 해소하고 `git add <경로>`로 표시한 뒤 커밋하거나, `git merge --abort`로 되돌린 다음 다시 돌린다.
+
+**표식을 직접 찾으려 하지 마라.** `test -f .git/MERGE_HEAD`는 **워크트리에서 항상 실패한다** — 워크트리의 표식은 `.git/worktrees/<이름>/` 아래에 있다(실측: 오케스트레이터가 이 방식으로 확인해 "병합 아님"이라는 답을 받았다). 정작 이 스크립트가 쓰이는 자리가 워크트리이므로, `git rev-parse --git-path MERGE_HEAD`처럼 git에게 경로를 물어야 한다.
+
+**지문 값은 기준 커밋에 따라 달라진다.** 계산이 `git diff HEAD`라서, 작업 트리가 한 글자도 바뀌지 않아도 그 사이에 커밋이 하나 생기면 값이 바뀐다. 같은 트리를 두 기준에서 찍어 확인했다(`d8f9b12` → `022ac422455a`, `9140273` → `4410fb3b6a83`). **라운드 간 대조는 HEAD가 같은 동안에만 성립한다** — 병합 커밋이나 중간 커밋을 넣은 뒤에는 값을 다시 찍어 기준을 새로 잡아야 한다.
+
 ## 워크트리를 격리하는 것은 설정이 아니라 점 디렉터리다
 
 **검사 도구 쪽에는 `.claude/worktrees/`를 제외하는 설정이 하나도 없다.** 확인한 결과다 — `.prettierignore`에는 `/src/generated`·`/dist`·`/coverage`만, `.eslintrc.js`의 `ignorePatterns`에는 `.eslintrc.js`·`src/generated/**`만, jest 설정(`package.json`)에는 `coveragePathIgnorePatterns: ["/generated/"]`뿐이다.
