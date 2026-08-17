@@ -40,6 +40,24 @@ lerna-debug.log*
 # 키 목록만 담긴 예시 파일은 추적한다. 위의 `.env.*`가 이것까지 잡아 버린다
 !.env.example
 
+# 데이터베이스 접속 문자열이 든 쿠버네티스 Secret.
+#
+# 정확한 파일명 하나만 막지 않고 이름에 `secret`이 든 매니페스트를 모두 막는다.
+# `kubectl create secret ... --dry-run=client -o yaml > k8s/db-secret.yaml`처럼
+# 이름을 조금 달리 붙이는 방식이 흔하고, 그때 평문 접속 문자열이 커밋 후보로
+# 올라온다. `.env` 쪽을 `.env` + `.env.*`로 넓게 막은 것과 같은 이유다 —
+# 이름 하나를 정확히 맞춰야만 작동하는 방어선은 이름을 조금 바꾸는 순간
+# 사라진다.
+#
+# 확장자도 `.yaml`과 `.yml` 양쪽을 덮는다(`.y*ml`). 쿠버네티스 매니페스트에서
+# 두 표기는 같은 빈도로 쓰이고, `kubectl`도 둘을 구별하지 않는다 — 확장자
+# 한 글자 차이로 방어선이 사라지면 위 근거가 그대로 무너진다. 이 폴더의
+# 매니페스트 이름에 `secret`이 들어가면서 추적해야 하는 것은 아래 예시 파일
+# 하나뿐이라, 넓게 잡아도 함께 막히는 것이 없다(`git check-ignore`로 확인).
+/k8s/*secret*.y*ml
+# 값이 비어 있는 예시 파일은 추적한다. 위 패턴이 이것까지 잡아 버린다
+!/k8s/secret.example.yaml
+
 # Prisma가 생성하는 클라이언트. 소스가 아니라 빌드 산출물이다 —
 # `npm ci`의 postinstall이 `prisma generate`로 다시 만든다
 /src/generated/prisma

@@ -1,0 +1,12 @@
+# 이 애플리케이션 전용 이름공간(namespace).
+#
+# 기본 이름공간에 섞어 두지 않는 이유는 정리 때문이다. 검증이 끝나면
+# `kubectl delete namespace grownup-todo` 한 줄로 Deployment·Service·Secret이
+# 함께 사라진다 — 명령으로 만든 Secret처럼 파일에 없는 자원을 빠뜨릴 여지가
+# 없다.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: grownup-todo
+  labels:
+    app.kubernetes.io/name: grownup-todo-backend

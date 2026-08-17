@@ -10,12 +10,19 @@ describe('validateEnv', () => {
     );
   });
 
-  it('DATABASE_URL 외의 값도 함께 통과시킨다', () => {
+  it('검증하지 않는 키도 원본 그대로 함께 통과시킨다', () => {
     // ConfigModule은 validate의 **반환값으로** 설정 객체를 교체한다.
     // 검증하지 않은 키를 빼서 돌려주면 ConfigService에서 조용히 사라진다.
-    const result = validateEnv({ DATABASE_URL: VALID_URL, PORT: '3000' });
+    // 예시로 DIRECT_URL을 쓰는 이유는 PORT가 검증·정규화 대상이 되어
+    // "손대지 않고 통과시키는 키"의 예가 될 수 없기 때문이다.
+    const result = validateEnv({
+      DATABASE_URL: VALID_URL,
+      DIRECT_URL: 'postgres://postgres:pw@localhost:5432/postgres',
+    });
 
-    expect(result.PORT).toBe('3000');
+    expect(result.DIRECT_URL).toBe(
+      'postgres://postgres:pw@localhost:5432/postgres',
+    );
   });
 
   it.each([
@@ -47,5 +54,124 @@ describe('validateEnv', () => {
     // DIRECT_URL은 Prisma CLI만 쓴다. 런타임 배포 환경에는 없는 것이 정상이고,
     // 여기서 필수로 걸면 마이그레이션을 돌리지 않는 환경의 부팅이 막힌다
     expect(() => validateEnv({ DATABASE_URL: VALID_URL })).not.toThrow();
+  });
+
+  describe('PORT', () => {
+    it('없으면 기본값 4080이다', () => {
+      expect(validateEnv({ DATABASE_URL: VALID_URL }).PORT).toBe(4080);
+    });
+
+    it.each([
+      ['빈 문자열', ''],
+      ['공백뿐인 문자열', '  '],
+      ['undefined', undefined],
+    ])('%s면 기본값 4080이다', (_설명, port) => {
+      // `.env.example`이 `PORT=`로 비워 두고 있어 빈 문자열이 실제로 들어온다.
+      // 빈 값을 오류로 보면 예시 파일을 그대로 복사한 `.env`가 부팅을 막는다
+      expect(validateEnv({ DATABASE_URL: VALID_URL, PORT: port }).PORT).toBe(
+        4080,
+      );
+    });
+
+    it('문자열로 온 포트를 숫자로 바꿔 돌려준다', () => {
+      // process.env의 값은 언제나 문자열이다. 여기서 숫자로 바꿔 두지 않으면
+      // 값을 읽는 쪽마다 변환을 반복하게 되고, 한 곳이 빠지면 문자열이 샌다
+      expect(validateEnv({ DATABASE_URL: VALID_URL, PORT: '8080' }).PORT).toBe(
+        8080,
+      );
+    });
+
+    it('앞뒤 공백은 떼고 받는다', () => {
+      // 값을 손으로 편집하다 남는 공백까지 오류로 볼 이유는 없다
+      expect(
+        validateEnv({ DATABASE_URL: VALID_URL, PORT: ' 8080 ' }).PORT,
+      ).toBe(8080);
+    });
+
+    it.each([
+      ['하한', '1', 1],
+      ['상한', '65535', 65535],
+    ])('%s 경계값은 받는다', (_설명, port, expected) => {
+      // 경계 **바깥**을 던지는 단정만 있으면 부등호를 한 칸 밀어도 전부
+      // 통과한다. 유효한 양 끝을 받는 것까지 함께 고정해야 범위가 잠긴다
+      expect(validateEnv({ DATABASE_URL: VALID_URL, PORT: port }).PORT).toBe(
+        expected,
+      );
+    });
+
+    it.each([
+      ['정수가 아니다', '8080.5'],
+      ['숫자가 아니다', 'http'],
+      ['0이다', '0'],
+      ['음수다', '-1'],
+      ['65535를 넘는다', '65536'],
+      // 아래 셋은 `Number()`가 조용히 받아 주던 표기다. 문서와 오류 메시지가
+      // "10진수 정수"를 약속하므로 여기서 거절해야 한다 — `0x10`을 적은 사람이
+      // 16번 포트로 떴다는 사실을 어디서도 알 수 없는 것이 가장 나쁘다
+      ['16진수 표기다', '0x10'],
+      ['지수 표기다', '8e3'],
+      ['부호가 붙었다', '+8080'],
+    ])('PORT가 %s면 던진다', (_설명, port) => {
+      expect(() =>
+        validateEnv({ DATABASE_URL: VALID_URL, PORT: port }),
+      ).toThrow(/PORT/);
+    });
+  });
+
+  describe('SHUTDOWN_DRAIN_DELAY_MS', () => {
+    it('없으면 기본값 5000이다', () => {
+      // 매니페스트가 없어도 드레인이 동작하는 값이다(사용자 확정 2026-08-12)
+      expect(
+        validateEnv({ DATABASE_URL: VALID_URL }).SHUTDOWN_DRAIN_DELAY_MS,
+      ).toBe(5000);
+    });
+
+    it.each([
+      ['빈 문자열', ''],
+      ['공백뿐인 문자열', '  '],
+      ['undefined', undefined],
+    ])('%s면 기본값 5000이다', (_설명, delay) => {
+      expect(
+        validateEnv({ DATABASE_URL: VALID_URL, SHUTDOWN_DRAIN_DELAY_MS: delay })
+          .SHUTDOWN_DRAIN_DELAY_MS,
+      ).toBe(5000);
+    });
+
+    it('0을 받는다', () => {
+      // `PORT`와 달리 0이 유효한 값이다 — 매니페스트가 `preStop: sleep`으로
+      // 대기를 대신하기로 하면 앱 내부 대기를 꺼야 한다
+      expect(
+        validateEnv({ DATABASE_URL: VALID_URL, SHUTDOWN_DRAIN_DELAY_MS: '0' })
+          .SHUTDOWN_DRAIN_DELAY_MS,
+      ).toBe(0);
+    });
+
+    it('상한 60000을 받는다', () => {
+      expect(
+        validateEnv({
+          DATABASE_URL: VALID_URL,
+          SHUTDOWN_DRAIN_DELAY_MS: '60000',
+        }).SHUTDOWN_DRAIN_DELAY_MS,
+      ).toBe(60000);
+    });
+
+    it.each([
+      ['음수다', '-1'],
+      ['소수다', '1500.5'],
+      ['숫자가 아니다', 'soon'],
+      ['16진수 표기다', '0x10'],
+      ['지수 표기다', '5e3'],
+      ['상한 60000을 넘는다', '60001'],
+    ])('SHUTDOWN_DRAIN_DELAY_MS가 %s면 던진다', (_설명, delay) => {
+      // 상한을 두는 이유는 대기 + 자원 해제 예산이
+      // `terminationGracePeriodSeconds`를 넘으면 k8s가 SIGKILL로 잘라
+      // 드레인도 자원 해제도 끝내지 못하기 때문이다
+      expect(() =>
+        validateEnv({
+          DATABASE_URL: VALID_URL,
+          SHUTDOWN_DRAIN_DELAY_MS: delay,
+        }),
+      ).toThrow(/SHUTDOWN_DRAIN_DELAY_MS/);
+    });
   });
 });
