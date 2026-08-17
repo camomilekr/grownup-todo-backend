@@ -12,8 +12,10 @@ const POSTGRES_SCHEME = /^postgres(ql)?:\/\//;
 /**
  * `PORT`를 주지 않았을 때 애플리케이션이 리슨하는 포트.
  *
- * 컨테이너 이미지의 EXPOSE와 k8s 배포 매니페스트의 containerPort는 이 값과
- * 같아야 한다 — 아직 이 저장소에 그 파일들이 없으므로, 추가할 때 맞춘다.
+ * 컨테이너 이미지의 EXPOSE(`Dockerfile`)와 k8s 배포 매니페스트의 containerPort·
+ * `PORT`·Service 포트가 이 값과 같아야 한다. 그 일치는
+ * `src/config/deployment-port.spec.ts`가 테스트로 고정한다 — 그 테스트는 이
+ * 상수를 직접 읽지 않고 `validateEnv`를 지나서 기본 포트를 얻는다.
  */
 const DEFAULT_PORT = 4080;
 
@@ -28,8 +30,10 @@ const MAX_PORT = 65535;
  * 병렬로 일어나, 시그널을 받은 뒤에도 잠시 새 요청이 들어온다. 그 사이에
  * HTTP 서버를 닫으면 커넥션 거절이 된다 — 이 대기가 그 창을 덮는다.
  *
- * 매니페스트가 아직 없어 `preStop` 훅에 기댈 수 없으므로, 앱 스스로 드레인이
- * 되는 값을 기본값으로 둔다(사용자 확정 2026-08-12).
+ * 매니페스트를 전제하지 않고 앱 스스로 드레인이 되는 값을 기본값으로 둔다
+ * (사용자 확정 2026-08-12). **이 저장소의 k8s 매니페스트는 기본값에 맡기지 않고
+ * 8000을 명시적으로 주입한다** — 그 값은 준비 확인 프로브의 주기·실패 허용
+ * 횟수와 짝을 맞춘 결과이고, 근거와 계산은 `k8s/deployment.yaml`에 있다.
  */
 const DEFAULT_SHUTDOWN_DRAIN_DELAY_MS = 5_000;
 
@@ -41,8 +45,9 @@ const DEFAULT_SHUTDOWN_DRAIN_DELAY_MS = 5_000;
  * **이 상한을 통과한 값이 `terminationGracePeriodSeconds`와 양립한다는 뜻은
  * 아니다.** 상한값 60초에 자원 해제 예산(`DISPOSE_TIMEOUT_MS` 10초)만 더해도
  * k8s 기본 유예 30초를 이미 넘는다. 대기 시간과 유예 기간을 실제로 맞추는 것은
- * 매니페스트를 쓰는 쪽의 몫이고, 맞춰야 할 조건은
- * `src/health/CONTEXT.md`의 "매니페스트가 만족해야 할 조건"에 있다.
+ * 매니페스트를 쓰는 쪽의 몫이고, 이 저장소의 매니페스트는
+ * `k8s/deployment.yaml`의 `terminationGracePeriodSeconds` 주석에서 그 예산을
+ * 더해 보인다. 맞춰야 할 조건 목록은 `src/health/CONTEXT.md`에 있다.
  */
 const MAX_SHUTDOWN_DRAIN_DELAY_MS = 60_000;
 

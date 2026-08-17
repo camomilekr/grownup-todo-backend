@@ -1,6 +1,6 @@
 # CONTEXT
 
-> 마지막 업데이트: 2026-08-13
+> 마지막 업데이트: 2026-08-17
 
 ## 역할
 
@@ -12,6 +12,7 @@
 |--------|------|
 | `env.validation.ts` | `validateEnv`. `ConfigModule.forRoot({ validate })`에 걸린다 |
 | `env.validation.spec.ts` | 분기별 테스트 |
+| `deployment-port.spec.ts` | 코드 밖 배포 설정(`Dockerfile`의 EXPOSE, Deployment의 `PORT`·`containerPort`, Service 포트)이 기본 포트와 일치하는지 대조한다. 짝이 되는 소스 파일이 없는 spec이다 |
 
 ## 핵심 로직
 
@@ -23,7 +24,9 @@
 
 **정수 환경변수는 `parseIntegerEnv` 한 곳을 지난다.** 명세(`이름`·`기본값`·`min`·`max`)만 다르고 규칙은 같다 — 빈 값은 기본값, 표기는 10진수 정수만, 범위 밖은 부팅 실패. 변수마다 파서를 따로 두면 "빈 값을 기본값으로 본다" 같은 규칙이 한쪽에만 반영되는 날이 온다. **`Number.isInteger` 검사는 일부러 뺐다** — `/^\d+$/`를 통과한 값은 항상 정수라 판정에 관여하지 못하는 조건이었고, 남겨 두면 읽는 사람이 "정규식이 막지 못하는 무언가가 있다"고 오해한다.
 
-**`SHUTDOWN_DRAIN_DELAY_MS`는 `PORT`와 하한이 다르다.** 0이 유효하다 — 매니페스트가 `preStop: sleep`으로 대기를 대신하기로 하면 앱 내부 대기를 꺼야 한다. **상한 60000이 막는 것은 자릿수 오타(`5000`을 `500000`으로 적는 류)까지다** — 이 검증을 통과했다고 `terminationGracePeriodSeconds`와 양립한다는 뜻이 아니다. 상한값 60초에 자원 해제 예산(`DISPOSE_TIMEOUT_MS` 10초)만 더해도 k8s 기본 유예 30초를 넘으므로, 허용 범위 안의 값으로도 SIGKILL이 드레인 중간을 자를 수 있다. **유예 기간과의 양립은 검증이 아니라 매니페스트가 맞춰야 하고**, 맞춰야 할 조건은 `src/health/CONTEXT.md`의 "매니페스트가 만족해야 할 조건"에 있다. 소비하는 곳은 `src/shutdown/shutdown-registry.service.ts`다.
+**기본 포트 상수는 export하지 않는다.** `deployment-port.spec.ts`가 그것을 필요로 하지만, 테스트를 위해 내부 상수를 열지 않고 `validateEnv({ DATABASE_URL })`를 불러 `PORT`를 받는다 — 매니페스트가 맞춰야 하는 것은 "코드에 적힌 숫자"가 아니라 **`PORT`를 주지 않았을 때 애플리케이션이 실제로 여는 포트**이고, 검증 함수를 지난 값이 바로 그것이다. 기본값을 채우는 코드가 사라지는 회귀도 이 경로에서만 걸린다.
+
+**`SHUTDOWN_DRAIN_DELAY_MS`는 `PORT`와 하한이 다르다.** 0이 유효하다 — 매니페스트가 `preStop: sleep`으로 대기를 대신하기로 하면 앱 내부 대기를 꺼야 한다. 이 저장소의 매니페스트는 그 반대를 택해 `preStop`을 두지 않고 8000을 주입한다(`k8s/deployment.yaml`). **상한 60000이 막는 것은 자릿수 오타(`5000`을 `500000`으로 적는 류)까지다** — 이 검증을 통과했다고 `terminationGracePeriodSeconds`와 양립한다는 뜻이 아니다. 상한값 60초에 자원 해제 예산(`DISPOSE_TIMEOUT_MS` 10초)만 더해도 k8s 기본 유예 30초를 넘으므로, 허용 범위 안의 값으로도 SIGKILL이 드레인 중간을 자를 수 있다. **유예 기간과의 양립은 검증이 아니라 매니페스트가 맞춰야 하고**, 맞춰야 할 조건은 `src/health/CONTEXT.md`의 "매니페스트가 만족해야 할 조건"에 있다. 소비하는 곳은 `src/shutdown/shutdown-registry.service.ts`다.
 
 **경계값은 "받는다" 쪽도 단정한다.** 바깥을 던지는 단정만 있으면 부등호를 한 칸 밀어도(`<` → `<=`) 전부 통과한다 — 실제로 밀어 보고 4건이 실패하는 것을 확인했다(2026-08-12).
 

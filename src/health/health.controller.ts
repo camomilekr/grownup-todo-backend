@@ -28,8 +28,8 @@ export class HealthController {
   constructor(private readonly readinessService: ReadinessService) {}
 
   /**
-   * liveness — **종료 중에도 200이다.** 여기에 종료 판정을 넣으면 kubelet이
-   * 유예 기간 중에 컨테이너를 죽여 드레인 자체가 잘린다.
+   * liveness — **종료 중에도 200이다.** 여기에 종료 판정을 넣지 마라. 근거는
+   * `docs/k8s-local-verification.md` ① 절에 있다.
    */
   @Get(HEALTH_PING_PATH)
   ping(): string {

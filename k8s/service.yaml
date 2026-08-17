@@ -1,0 +1,34 @@
+# 파드 앞에 두는 고정 진입점.
+#
+# 파드는 재배포마다 이름과 IP 주소가 바뀐다. Service는 바뀌지 않는 주소를
+# 하나 제공하고, 준비 확인(readiness)을 통과한 파드에만 요청을 넘긴다 —
+# 재배포 중 요청 실패 0건을 확인하려면 파드가 아니라 **반드시 이 Service를
+# 거쳐** 요청을 보내야 한다. 파드를 직접 가리키면 그 파드가 사라질 때 요청이
+# 실패하는 것이 당연하고, 그것은 검증이 되지 못한다.
+apiVersion: v1
+kind: Service
+metadata:
+  name: grownup-todo-backend
+  namespace: grownup-todo
+  labels:
+    app.kubernetes.io/name: grownup-todo-backend
+spec:
+  # Docker Desktop의 쿠버네티스는 LoadBalancer 유형에 외부 주소를 붙여 주지
+  # 않는 구성이 있어서, 환경에 관계없이 동작하는 ClusterIP를 쓴다. 호스트에서
+  # 접근할 때는 `kubectl port-forward`로 이 Service에 연결한다 — 구체적인
+  # 명령은 `docs/k8s-local-verification.md`에 있다.
+  type: ClusterIP
+
+  selector:
+    app.kubernetes.io/name: grownup-todo-backend
+
+  ports:
+    - name: http
+      # Service 자신의 포트. 컨테이너 포트와 달라도 동작하지만, 다르게 두면
+      # 포트 포워딩 명령과 검증 문서의 주소가 갈려서 헷갈린다. 같게 유지하고
+      # `src/config/deployment-port.spec.ts`가 그 일치를 고정한다.
+      port: 4080
+      # 전달 대상은 숫자가 아니라 Deployment가 붙인 포트 **이름**이다.
+      # 포트를 바꿀 때 고칠 곳이 containerPort 한 군데로 줄어든다.
+      targetPort: http
+      protocol: TCP

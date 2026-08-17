@@ -58,7 +58,7 @@ cp .env.example .env
 | `DATABASE_URL` | 애플리케이션 런타임용. Supabase 트랜잭션 모드 풀러(포트 6543). 없으면 부팅이 실패한다 |
 | `DIRECT_URL` | Prisma CLI(Command Line Interface, 명령줄 도구)용. 세션 모드 풀러(포트 5432). 마이그레이션·studio가 쓴다 |
 | `PORT` | HTTP 리슨 포트. 비워 두면 4080이다. 1~65535 범위의 10진수 정수만 받고, 그 밖의 값이면 부팅이 실패한다 |
-| `SHUTDOWN_DRAIN_DELAY_MS` | 종료(SIGTERM) 후 HTTP 서버를 닫기까지 기다리는 시간(ms). 비워 두면 5000이다. 0~60000 범위의 10진수 정수만 받는다 |
+| `SHUTDOWN_DRAIN_DELAY_MS` | 종료(SIGTERM) 후 HTTP 서버를 닫기까지 기다리는 시간(밀리초). 비워 두면 5000이다. 0~60000 범위의 10진수 정수만 받는다 |
 
 ## 실행
 
@@ -85,6 +85,44 @@ npm run verify        # lint → prettier → typecheck. 커밋 전에 돌린다
 ```
 
 pre-commit 훅이 `verify`를 자동으로 실행한다. 단, 테스트는 훅에 들어 있지 않으므로 커밋 전에 `npm test`와 `npm run test:e2e`를 직접 돌려야 한다.
+
+## 컨테이너와 쿠버네티스
+
+```bash
+docker build -t grownup-todo-backend:local .                        # 이미지 빌드
+kubectl apply -f k8s/namespace.yaml
+kubectl apply -f k8s/secret.yaml                                    # 예시 파일을 복사해 값을 채운 것
+kubectl apply -f k8s/deployment.yaml -f k8s/service.yaml
+```
+
+파일을 하나씩, 위 순서대로 지정한다. `kubectl apply -f k8s/`처럼 폴더째 넘기면
+**Deployment가 만들어지지 않는데 오류가 마지막 한 줄로만 나와 성공한 것처럼
+보인다.** 기전과 실측은
+[`docs/k8s-local-verification.md`](docs/k8s-local-verification.md)의 3단계에 있다 —
+설명을 두 곳에 두면 갈라지므로 그쪽에만 둔다.
+
+| 경로 | 역할 |
+|---|---|
+| `Dockerfile` | 빌드 단계와 실행 단계를 나눈 이미지 정의. 실행은 루트가 아닌 사용자로, node가 1번 프로세스가 되게 한다 |
+| `k8s/namespace.yaml` | 전용 이름공간 `grownup-todo` |
+| `k8s/deployment.yaml` | 배포 정의. 무중단 갱신, 세 종류의 프로브, 종료 유예·드레인 설정 |
+| `k8s/service.yaml` | 파드 앞의 고정 진입점 |
+| `k8s/secret.example.yaml` | `DATABASE_URL`을 담을 Secret의 예시. **값은 비어 있고, 실제 값은 커밋하지 않는다** |
+
+Docker Desktop에 들어 있는 쿠버네티스로 직접 띄워 보고, 프로브·정상 종료·종료
+로그·재배포 중 요청 실패 0건까지 확인하는 절차는
+**[`docs/k8s-local-verification.md`](docs/k8s-local-verification.md)**에 명령 단위로 있다.
+
+애플리케이션이 듣는 포트는 환경변수 `PORT`가 정하고, 비워 두면 4080으로 뜬다.
+이 값은 `Dockerfile`의 `EXPOSE`, `k8s/`의 포트 설정과 반드시 같아야 하며 그
+일치는 `src/config/deployment-port.spec.ts`가 테스트로 고정한다.
+
+프로브는 경로가 둘로 갈린다 — 생존 확인·기동 확인은 종료 중에도 200인
+`/api/v1/ping`을, 준비 확인은 종료가 시작되면 503이 되는 `/api/v1/ready`를 본다.
+매니페스트가 준비 확인의 주기·실패 허용 횟수를 드레인 대기
+(`SHUTDOWN_DRAIN_DELAY_MS`)와 짝으로 맞춰야 하고, 그 짝을
+`src/health/deployment-probe.spec.ts`가 테스트로 고정한다. 어긋나도 오류가 나지
+않고 배출만 조용히 사라지므로 눈으로만 관리하지 않는다.
 
 ## 데이터베이스 마이그레이션
 

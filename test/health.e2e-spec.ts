@@ -88,9 +88,9 @@ describe('Health (e2e)', () => {
       await request(app.getHttpServer()).get('/api/v1/ready').expect(503);
     });
 
-    // 이 단정이 이 기능의 핵심이다. liveness까지 503이 되면 kubelet이 유예
-    // 기간 중에 컨테이너를 죽여 드레인 자체가 잘린다 — 겸용 경로 하나를
-    // 503으로 바꾸는 구현과 이 구현을 가르는 지점이다.
+    // 이 단정이 이 기능의 핵심이다 — 겸용 경로 하나를 종료 시 503으로 바꾸는
+    // 구현과 이 구현을 가르는 지점이다. liveness까지 503이 되면 무엇을 잃는지는
+    // `docs/k8s-local-verification.md` ① 절에 실측과 함께 있다.
     it('종료가 시작돼도 liveness는 200을 유지한다', async () => {
       await 종료를_시작한다();
 

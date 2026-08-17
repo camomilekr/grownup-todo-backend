@@ -9,10 +9,9 @@ import { ShutdownRegistry } from '../shutdown/shutdown-registry.service';
  * 여기 있어야 나중에 "종료 중"이 아닌 다른 미준비 조건이 생겼을 때 둘 자리가
  * 이미 있다.
  *
- * **liveness와 다른 점이 이 클래스의 전부다.** liveness(`ping`)는 종료 중에도
- * 200이어야 한다 — 종료 중에 liveness가 실패하면 kubelet이 유예 기간 중에
- * 컨테이너를 죽여 드레인 자체가 잘린다. readiness만 503으로 바뀌어 새 요청이
- * 이 파드로 오지 않게 한다.
+ * **liveness와 다른 점이 이 클래스의 전부다.** 종료 중에 503이 되는 것은 readiness
+ * 하나이고, liveness(`ping`)는 200을 유지한다 — 그렇게 갈라야 하는 근거와 어긋났을
+ * 때의 대가는 `docs/k8s-local-verification.md`의 ① 절 한 곳에 실측과 함께 있다.
  *
  * **DB를 보지 않는다.** `src/health/CONTEXT.md`가 금지하는 것과 같은 이유다 —
  * 프로브가 DB에 묶이면 DB 장애 때 멀쩡한 파드가 엔드포인트에서 빠진다.

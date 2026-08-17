@@ -1,6 +1,6 @@
 # CONTEXT
 
-> 마지막 업데이트: 2026-08-13
+> 마지막 업데이트: 2026-08-17
 
 ## 역할
 
@@ -13,6 +13,7 @@ k8s liveness·readiness 프로브가 때리는 헬스 체크 엔드포인트를 
 | `health.controller.ts` | `GET /api/v1/ping` → 200 `pong`(liveness), `GET /api/v1/ready` → 200 `ready`(readiness). 경로 조각을 `HEALTH_PING_PATH`·`HEALTH_READY_PATH`로 export한다 |
 | `readiness.service.ts` | readiness 판정. 종료가 시작됐으면 `ServiceUnavailableException`(503) |
 | `health.module.ts` | `HealthController`·`ReadinessService` 등록, `ShutdownModule` import |
+| `deployment-probe.spec.ts` | k8s 매니페스트의 프로브 배선이 이 폴더의 설계와 맞는지 대조한다. 짝이 되는 소스 파일이 없는 spec이고, 검사 대상은 `k8s/deployment.yaml`이다 |
 
 검증은 `readiness.service.spec.ts`(판정)와 `test/health.e2e-spec.ts`(라우팅·상태 전환·로깅 제외)로 나뉜다 — 컨트롤러 단위 spec은 규약상 만들지 않는다(라우팅 검증은 e2e의 몫, `.claude/rules/nestjs.md`). e2e가 `AppModule`로 부트하므로 **`AppModule`이 이 모듈을 물고 있는지**까지 함께 고정된다. e2e도 `setupApp()`을 불러야 프로덕션과 같은 경로를 본다 — 부르지 않으면 `/ping`을 검증하게 된다.
 
@@ -27,7 +28,9 @@ k8s liveness·readiness 프로브가 때리는 헬스 체크 엔드포인트를 
 | `GET /api/v1/ping` | 프로세스가 살아 있는가 | **200 유지** |
 | `GET /api/v1/ready` | 새 요청을 받아도 되는가 | **503** |
 
-**종료 중에 liveness를 실패시키면 안 된다.** kubelet이 유예 기간 중에 컨테이너를 죽여 드레인 자체가 잘린다. 겸용 경로 하나를 종료 시 503으로 바꾸는 구현이 정확히 이 함정이고, `test/health.e2e-spec.ts`의 '종료가 시작돼도 liveness는 200을 유지한다'가 그 회귀를 잡는다 — liveness에 종료 판정을 넣는 변형에서 이 단정만 실패하는 것을 확인했다(2026-08-12).
+**종료 중에 liveness를 실패시키면 안 된다.** 겸용 경로 하나를 종료 시 503으로 바꾸는 구현이 정확히 이 함정이고, `test/health.e2e-spec.ts`의 '종료가 시작돼도 liveness는 200을 유지한다'가 그 회귀를 잡는다 — liveness에 종료 판정을 넣는 변형에서 이 단정만 실패하는 것을 확인했다(2026-08-12).
+
+**왜 그래야 하는지(어느 종료 경로에서 무엇을 잃는지)는 `docs/k8s-local-verification.md`의 ① 절 한 곳에 실측과 함께 있다.** 이 폴더 문서에도, 매니페스트 주석에도, 코드 주석에도 그 인과를 다시 유도하지 않는다 — 같은 인과를 여러 곳에서 유도하다 한쪽만 고쳐지는 일이 실제로 반복됐다. 여기서 알아야 할 것은 위 표의 규칙(무엇이 200이고 무엇이 503인가)까지다.
 
 **판정은 컨트롤러가 아니라 `ReadinessService`에 있다.** 컨트롤러에 조건 분기를 두지 않는 규약이고, 판정이 한 줄이어도 Service에 있어야 "종료 중" 외의 미준비 조건이 생겼을 때 둘 자리가 이미 있다. 판정 근거는 `ShutdownRegistry.isShuttingDown()`이다(`src/shutdown/CONTEXT.md`).
 
@@ -37,13 +40,25 @@ k8s liveness·readiness 프로브가 때리는 헬스 체크 엔드포인트를 
 
 ## 매니페스트가 만족해야 할 조건
 
-매니페스트·Dockerfile은 아직 이 저장소에 없다(인프라 미정). 앱은 매니페스트를 전제하지 않고 스스로 드레인하지만, 매니페스트를 쓸 때 아래를 맞춰야 의도대로 동작한다.
+매니페스트(`k8s/deployment.yaml`)와 `Dockerfile`이 이 저장소에 들어왔다. 앱은 매니페스트를 전제하지 않고 스스로 드레인하지만, 아래가 맞아야 그 드레인이 의미를 갖는다. **전부 어긋나도 오류가 나지 않는 종류라** 셋은 테스트로 고정했다(`src/health/deployment-probe.spec.ts`).
 
-- **프로브 경로 둘을 각각 연결한다.** `livenessProbe` → `/api/v1/ping`, `readinessProbe` → `/api/v1/ready`. **한 경로를 양쪽에 쓰면 안 된다** — 드레인 중 readiness 실패가 liveness 실패로도 읽혀 컨테이너가 조기에 죽는다
-- **`terminationGracePeriodSeconds`는 `SHUTDOWN_DRAIN_DELAY_MS`(기본 5초) + 자원 해제 예산(`DISPOSE_TIMEOUT_MS` 10초) + 여유보다 커야 한다.** 기본값 30초면 충분하고, 드레인 대기를 늘리면 이 값도 함께 본다
+| 조건 | 현재 값 | 가드 |
+|---|---|---|
+| `readinessProbe` → `/api/v1/ready` | `periodSeconds: 1`, `timeoutSeconds: 1`, `failureThreshold: 2` | `deployment-probe.spec.ts` |
+| `livenessProbe` → `/api/v1/ping` | `periodSeconds: 10`, `timeoutSeconds: 2`, `failureThreshold: 3` | `deployment-probe.spec.ts` |
+| `startupProbe` → `/api/v1/ping` | `periodSeconds: 2`, `failureThreshold: 30` | `deployment-probe.spec.ts` |
+| 준비 확인 판정 시간 + 전파 여유 < 드레인 대기 | `(1+1)×2 = 4초` + 2초 < 8초 | `deployment-probe.spec.ts` |
+| `terminationGracePeriodSeconds` ≥ 드레인 + 자원 해제 예산 + 여유 | 30초 = 8 + 10 + 여유 12 | 가드 없음 — 매니페스트 주석의 계산 |
+
+**어긋났을 때 무엇을 잃는지는 `docs/k8s-local-verification.md` ① 절에 종료 경로별로 정리돼 있다.** 판정 시간의 계산식은 가드 코드가 기준이다.
+
 - **SIGTERM이 PID 1(애플리케이션 프로세스)에 닿아야 한다.** 셸을 거쳐 뜨면(`sh -c "node dist/main"`) 셸이 시그널을 전달하지 않아 드레인이 통째로 건너뛰어지고 SIGKILL로 끝난다 — `CMD ["node", "dist/main"]` 형태(exec form)로 띄운다
-- `readinessProbe.periodSeconds`가 드레인 대기보다 길면 파드가 엔드포인트에서 빠지기 전에 HTTP가 닫힌다. 대기 시간은 프로브 주기의 몇 배로 잡는다
-- `preStop` 훅으로 대기를 대신하기로 하면 `SHUTDOWN_DRAIN_DELAY_MS=0`으로 둔다 — 둘 다 두면 대기가 더해진다
+- **`preStop` 훅은 두지 않는다.** 드레인 국면과 같은 창을 덮으므로 함께 두면 대기가 이중으로 쌓인다. 대기를 매니페스트로 되돌리려면 `SHUTDOWN_DRAIN_DELAY_MS=0`을 함께 내려야 한다
+- **드레인 대기를 바꾸면 준비 확인 값과 유예 시간을 함께 본다.** 세 값은 독립적으로 고를 수 없다
+
+**"재배포 중 실패 0건"을 실제로 만드는 것은 준비 확인 503이 아니라 드레인 동안 HTTP를 열어 두는 것이다.** 엔드포인트 제거의 방아쇠가 준비 확인이 아니라 파드 삭제 표식 자체라는 사실과 그 실측은 `docs/k8s-local-verification.md`의 ②-2 절에 있다 — 준비 확인을 `ready`로 두는 것은 여전히 필수지만, 그 근거는 거기 한 곳에서 읽는다.
+
+**삭제 표식이 붙으면 kubelet은 liveness 프로브를 멈춘다**(startup도 함께 멈추는지는 측정하지 않았다 — ① 절의 미확인 목록에 있다). 이 사실이 위 배선의 근거이고, 그것을 확인한 실측 여섯 건은 `docs/k8s-local-verification.md` ① 절에 있다 — **생존 확인 경로를 잘못 배선한 대가는 이 저장소의 클러스터 검증 절차(파드 삭제·재배포)로는 관측되지 않으므로, 그 자리는 `deployment-probe.spec.ts`가 대신 지킨다.**
 
 ## 의존성
 
